@@ -1,0 +1,29 @@
+from setuptools import setup, find_packages
+
+setup(
+    name="lite-llm-proxy",
+    version="1.0.0",
+    description="LiteLLM API Gateway",
+    packages=find_packages(),
+    install_requires=[
+        "fastapi>=0.104.1",
+        "uvicorn>=0.31.1",
+        "litellm==1.22.3",
+        "sqlalchemy==2.0.23",
+        "asyncpg==0.29.0",
+        "redis==5.0.1",
+        "pydantic>=2.11.0,<3.0.0",
+        "pydantic-settings>=2.5.2",
+        "python-multipart>=0.0.9",
+        "python-dotenv==1.0.0",
+        "requests==2.31.0",
+        "python-jose==3.3.0",
+        "passlib==1.7.4",
+        "bcrypt==4.0.1",
+        "setuptools==69.0.3",
+        "greenlet==3.0.3",
+        "anyio>=4.5",
+        "httpx>=0.27.1",
+    ],
+    python_requires=">=3.8",
+)

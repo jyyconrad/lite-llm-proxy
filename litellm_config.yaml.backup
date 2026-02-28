@@ -1,0 +1,232 @@
+model_list:
+  # OpenAI Models
+  - model_name: "deepseek-v3.1"
+    litellm_params:
+      model: "deepseek-v3.1"
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 60
+    tpm: 60000
+    model_info:
+      description: "deepseek v3.1 model"
+      max_tokens: 65536
+      provider: "openai"
+  - model_name: "deepseek-v3.1-thinking"
+    litellm_params:
+      model: "deepseek-v3.1-thinking"
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 120
+    tpm: 90000
+    model_info:
+      description: "deepseek v3.1 thinking model"
+      max_tokens: 65536
+      provider: "openai"
+
+  - model_name: "deepseek-v3.2-exp"
+    litellm_params:
+      model: "deepseek-v3.2-exp"
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 120
+    tpm: 90000
+    model_info:
+      description: "deepseek v3.2 exp model"
+      max_tokens: 65536
+      provider: "openai"
+  - model_name: "deepseek-v3.2-exp-thinking"
+    litellm_params:
+      model: "deepseek-v3.2-exp-thinking"
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 120
+    tpm: 90000
+    model_info:
+      description: "deepseek v3.2 exp thinking model"
+      max_tokens: 65536
+      provider: "openai"
+  - model_name: "deepseek-v3.2-huoshan"
+    litellm_params:
+      model: "deepseek-v3.2-huoshan"  
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 120
+    tpm: 90000
+    model_info:
+      description: "deepseek v3.2 huoshan model"
+      max_tokens: 32768
+      provider: "openai"
+  - model_name: "deepseek-v3.2-thinking-huoshan"
+    litellm_params:
+      model: "deepseek-v3.2-thinking-huoshan"  
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 120
+    tpm: 90000
+    model_info:
+      description: "deepseek v3.2 thinking huoshan model"
+      max_tokens: 32768
+      provider: "openai"
+  - model_name: "qwen3-235b-a22b-instruct-2507"
+    litellm_params:
+      model: "qwen3-235b-a22b-instruct-2507"
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 60
+    tpm: 60000
+    model_info:
+      description: "qwen3 235b a22b instruct 2507 model"
+      max_tokens: 32768
+      provider: "openai"
+  - model_name: "qwen3-235b-a22b-thinking-2507"
+    litellm_params:
+      model: "qwen3-235b-a22b-thinking-2507"
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 60
+    tpm: 60000
+    model_info:
+      description: "qwen3 235b a22b thinking 2507 model"
+      max_tokens: 32768
+      provider: "openai"
+  - model_name: "qwen3-next-80b-a3b-thinking"
+    litellm_params:
+      model: "qwen3-next-80b-a3b-thinking"
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 60
+    tpm: 60000
+    model_info:
+      description: "qwen3 next 80b a3b thinking model"
+      max_tokens: 32768
+      provider: "openai"
+  - model_name: "qwen3-next-80b-a3b-instruct"
+    litellm_params:
+      model: "qwen3-next-80b-a3b-instruct"
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 60
+    tpm: 60000
+    model_info:
+      description: "qwen3 next 80b a3b instruct model"
+      max_tokens: 32768
+      provider: "openai"
+  - model_name: "qwen3-32b"
+    litellm_params:
+      model: "qwen3-32b"
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 60
+    tpm: 60000
+    model_info:
+      description: "qwen3 32b model"
+      max_tokens: 32768
+      provider: "openai"
+  - model_name: "deepseek-r1-distill-qwen-32b"
+    litellm_params:
+      model: "deepseek-r1-distill-qwen-32b"
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 60
+    tpm: 60000
+    model_info:
+      description: "deepseek r1 distill qwen 32b model"
+      max_tokens: 32768
+      provider: "openai"
+  - model_name: "qwen3-30b-a3b-instruct-2507"
+    litellm_params:
+      model: "qwen3-30b-a3b-instruct-2507"
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 60
+    tpm: 60000
+    model_info:
+      description: "qwen3 30b a3b instruct 2507 model"
+      max_tokens: 32768
+      provider: "openai"
+  - model_name: "qwen3-coder-480b-a35b-instruct"
+    litellm_params:
+      model: "qwen3-coder-480b-a35b-instruct"
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 60
+    tpm: 60000
+    model_info:
+      description: "qwen3 coder 480b a35b instruct model"
+      max_tokens: 65536
+      provider: "openai"
+  - model_name: "code-agent-30b"
+    litellm_params:
+      model: "code-agent-30b"
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 60
+    tpm: 60000
+    model_info:
+      description: "code agent 30b model"
+      max_tokens: 65536
+      provider: "openai"
+  - model_name: "internvl3-14b"
+    litellm_params:
+      model: "internvl3-14b"
+      api_key: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+      base_url: "http://115.190.56.170:8000/v1"
+    rpm: 60
+    tpm: 60000
+    model_info:
+      description: "internvl3 14b model"
+      max_tokens: 16384
+      provider: "openai"
+  - model_name: "bge-m3"
+    litellm_params:
+      model: "BAAI/bge-m3"
+      api_key: "sk-oulrfsemkebjfedqencsheciqptuayweoetzpvfeajljybmc"
+      base_url: "https://api.siliconflow.cn/v1"
+    rpm: 60
+    tpm: 60000
+    model_info:
+      description: "BAAI/bge-m3"
+      max_tokens: 16384
+      provider: "openai"
+  - model_name: "mc-bge-m3"
+    litellm_params:
+      model: "bge-m3"
+      api_key: "sk-oulrfsemkebjfedqencsheciqptuayweoetzpvfeajljybmc"
+      base_url: "/Users/jiangyayun/.cache/modelscope/hub/models/BAAI/bge-m3"
+    rpm: 60
+    tpm: 60000
+    model_info:
+      description: "BAAI/bge-m3"
+      max_tokens: 16384
+      provider: "local"
+  - model_name: "Qwen3-Coder-30B-A3B-Instruct"
+    litellm_params:
+      model: "Qwen3-Coder-30B-A3B-Instruct:latest"
+      api_key: ""
+      base_url: "http://localhost:11434"
+    rpm: 10
+    tpm: 60
+    model_info:
+      description: "Ollama Qwen3-Coder-30B-A3B-Instruct"
+      max_tokens: 32768
+      provider: "ollama"
+
+litellm_settings:
+  cache: false
+  cache_params:
+    type: "redis"
+    host: "localhost"
+    port: 6379
+
+general_settings:
+  master_key: "sk-lite-llm-gateway-2025"
+  database_url: "postgresql://user:password@db:5432/litellm_gateway"
+  redis_url: "redis://redis:6379"
+
+environment_variables:
+  OPENAI_API_KEY: "sk-1vKC_x5NWWMqxjmJrGlD8w"
+  ANTHROPIC_API_KEY: "your-anthropic-api-key"
+  AZURE_OPENAI_ENDPOINT: "your-azure-endpoint"
+  AZURE_OPENAI_KEY: "your-azure-key"
+
+

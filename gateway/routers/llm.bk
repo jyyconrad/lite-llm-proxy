@@ -1,0 +1,888 @@
+# 标准库导入
+import asyncio
+import json
+import time
+import uuid
+from typing import Any, AsyncGenerator, Literal, Optional
+
+# 第三方库导入
+import litellm
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+from litellm import ModelResponse
+from litellm.utils import Delta, StreamingChoices
+from openai import OpenAI
+from pydantic import BaseModel
+from sqlalchemy import func
+from sqlalchemy.dialects.postgresql import insert
+
+# 本地模块导入
+from ..config import get_settings
+from ..dependencies import authenticate_user, check_rate_limit, get_logger, incr_rate_limit
+from ..local_model_manage import embedding_encode
+from ..models import CompletionRequest, EmbeddingRequest
+from config_manager import get_all_models, get_model_config
+from data import CompletionDetail, CompletionLog, UsageStat, sync_session
+
+# 配置 litellm 详细日志
+litellm.set_verbose = True
+logger = get_logger()
+
+
+# ==================== 数据模型 ====================
+
+class ModelInfo(BaseModel):
+    id: str
+    object: str = "model"
+    created: int = 0
+    owned_by: str = ""
+
+
+class ModelListResponse(BaseModel):
+    object: str = "list"
+    data: list[ModelInfo]
+
+
+# ==================== 日志收集器 ====================
+
+class StreamingLogCollector:
+    """流式响应日志收集器
+
+    用于在流式响应期间收集日志数据，解决嵌套函数中的变量作用域问题。
+    """
+
+    def __init__(self):
+        self.status: str = ""
+        self.error_message: str | None = None
+        self.choices: list = []
+        self.usage: dict = {}
+        self.tokens: int = 0
+        self.cost: float = 0
+        self.start_time: float = time.time()
+
+    @property
+    def duration(self) -> int:
+        """获取请求耗时（毫秒）"""
+        return int((time.time() - self.start_time) * 1000)
+    @property
+    def response_choices(self) -> list:
+        """将流式choices合并为完整的响应格式"""
+        if not self.choices:
+            return []
+
+        choices_by_index = {}
+        logger.info(f"choices:{json.dumps(self.choices,ensure_ascii=False,indent=2)}")
+        for choice in self.choices:
+            chunk_data = choice.model_dump() if hasattr(choice, "model_dump") else choice
+            index = chunk_data.get("index", 0)
+
+            if index not in choices_by_index:
+                choices_by_index[index] = {
+                    "index": index,
+                    "finish_reason": "",
+                    "message": {
+                        "content": "",
+                        "role": "",
+                        "function_call": None,
+                        "tool_calls": []
+                    }
+                }
+
+            delta = chunk_data.get("delta", {})
+
+            if "finish_reason" in chunk_data and chunk_data["finish_reason"]:
+                choices_by_index[index]["finish_reason"] = chunk_data["finish_reason"]
+
+            if "content" in delta and delta["content"]:
+                choices_by_index[index]["message"]["content"] += delta["content"]
+
+            if "role" in delta and delta["role"]:
+                choices_by_index[index]["message"]["role"] = delta["role"]
+
+            if "function_call" in delta and delta["function_call"]:
+                fc = delta["function_call"]
+                if choices_by_index[index]["message"]["function_call"] is None:
+                    choices_by_index[index]["message"]["function_call"] = {
+                        "name": "",
+                        "arguments": ""
+                    }
+                if "name" in fc and fc["name"]:
+                    choices_by_index[index]["message"]["function_call"]["name"] = fc["name"]
+                if "arguments" in fc and fc["arguments"]:
+                    # arguments 在流式中是逐块传递的字符串，需要动态累积
+                    # 保持原始字符串，不进行 JSON 解析
+                    choices_by_index[index]["message"]["function_call"]["arguments"] += fc["arguments"]
+
+            if "tool_calls" in delta and delta["tool_calls"]:
+                for tc in delta["tool_calls"]:
+                    tc_index = tc.get("index", 0)
+                    while len(choices_by_index[index]["message"]["tool_calls"]) <= tc_index:
+                        choices_by_index[index]["message"]["tool_calls"].append({
+                            "index": tc_index,
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""}
+                        })
+                    current_tc = choices_by_index[index]["message"]["tool_calls"][tc_index]
+                    if "type" in tc:
+                        current_tc["type"] = tc["type"]
+                    if "id" in tc:
+                        current_tc["id"] = tc["id"]
+                    if "function" in tc:
+                        func = tc["function"]
+                        if "name" in func and func["name"]:
+                            current_tc["function"]["name"] = func["name"]
+                        if "arguments" in func and func["arguments"]:
+                            # arguments 在流式中是逐块传递的字符串，保持原始累积
+                            current_tc["function"]["arguments"] += func["arguments"]
+
+        result = list(choices_by_index.values())
+        result.sort(key=lambda x: x["index"])
+
+        return result
+
+    def set_success(self):
+        """标记请求成功"""
+        self.status = "success"
+
+    def set_error(self, message: str):
+        """标记请求失败"""
+        self.status = "error"
+        self.error_message = message
+
+    @staticmethod
+    def _ensure_string_arguments(chunk_data: Any) -> Any:
+        """确保流式响应中的 arguments 是字符串格式
+
+        在 OpenAI 流式响应规范中，delta.function_call.arguments 和 delta.tool_calls[].function.arguments
+        必须是 JSON 字符串（因为它们是逐块传递的片段）。但某些模型提供商可能返回对象格式。
+
+        Args:
+            chunk_data: chunk 数据（可能是 dict 或 Pydantic 模型）
+
+        Returns:
+            处理后的 chunk 数据
+        """
+        # 转换为字典以便处理
+        if not isinstance(chunk_data, dict):
+            if hasattr(chunk_data, "model_dump"):
+                chunk_data = chunk_data.model_dump(un)
+            elif hasattr(chunk_data, "__dict__"):
+                chunk_data = chunk_data.__dict__
+            else:
+                return chunk_data
+
+        # 处理 choices 中的 delta
+        if "choices" in chunk_data and isinstance(chunk_data["choices"], list):
+            for choice in chunk_data["choices"]:
+                if isinstance(choice, dict) and "delta" in choice:
+                    delta = choice["delta"]
+
+                    # 处理 function_call.arguments
+                    if "function_call" in delta and isinstance(delta["function_call"], dict):
+                        fc = delta["function_call"]
+                        if isinstance(fc["arguments"], dict) and "arguments" in fc:
+                            fc["arguments"] = json.dumps(fc["arguments"], ensure_ascii=False)
+                        elif hasattr(fc, "arguments"):
+                            if fc.arguments:
+                                fc.arguments=make_json_safe()
+
+                    # 处理 tool_calls[].function.arguments
+                    if "tool_calls" in delta and isinstance(delta["tool_calls"], list):
+                        for tc in delta["tool_calls"]:
+                            if isinstance(tc, dict) and "function" in tc:
+                                func = tc["function"]
+                                if "arguments" in func and isinstance(func["arguments"], dict):
+                                    func["arguments"] = json.dumps(func["arguments"], ensure_ascii=False)
+
+        return chunk_data
+
+    def add_chunk(self, chunk: Any):
+        """收集 chunk 数据
+
+        Args:
+            chunk: OpenAI 流式响应 chunk
+        """
+        chunk_data = chunk.model_dump() if hasattr(chunk, "model_dump") else chunk
+        chunk_data = self._ensure_string_arguments(chunk_data)
+        if hasattr(chunk_data, 'choices'):
+            if chunk_data.choices:
+                self.choices.append(chunk_data)
+        elif isinstance(chunk_data, dict) and 'choices' in chunk_data:
+            if chunk_data['choices']:
+                self.choices.append(chunk_data)
+        if hasattr(chunk_data, 'usage'):
+            if chunk_data.usage:
+                self.usage = (
+                    chunk_data.usage.model_dump()
+                    if hasattr(chunk_data.usage, "model_dump")
+                    else chunk_data.usage
+                )
+                if hasattr(self.usage, "total_tokens"):
+                    self.tokens = self.usage.total_tokens
+        elif isinstance(chunk_data, dict) and 'usage' in chunk_data:
+            usage = chunk_data['usage']
+            if usage:
+                self.usage = (
+                    usage.model_dump()
+                    if hasattr(usage, "model_dump")
+                    else usage
+                )
+                if hasattr(self.usage, "total_tokens"):
+                    self.tokens = self.usage.total_tokens
+
+
+
+# ==================== 辅助函数 ====================
+
+def make_json_safe(obj: Any) -> Any:
+    """
+    递归地将 LiteLLM / OpenAI 对象转换为 JSON 兼容的字典
+
+    Args:
+        obj: 要转换的对象
+
+    Returns:
+        JSON 兼容的对象
+    """
+    if obj is None:
+        return None
+
+    # 基础类型
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+
+    # dict
+    if isinstance(obj, dict):
+        return {k: make_json_safe(v) for k, v in obj.items()}
+
+    # list / tuple
+    if isinstance(obj, (list, tuple)):
+        return [make_json_safe(i) for i in obj]
+
+    # Pydantic / LiteLLM object
+    if hasattr(obj, "model_dump"):
+        return make_json_safe(obj.model_dump())
+
+    # 兜底：强制字符串
+    return str(obj)
+
+
+def _parse_arguments_if_json(arguments: Any) -> Any:
+    """
+    如果 arguments 是 JSON 字符串，则解析为 JSON 对象
+
+    Args:
+        arguments: arguments 字段的值
+
+    Returns:
+        解析后的 JSON 对象，如果不是有效 JSON 字符串则返回原值
+    """
+    if not isinstance(arguments, str):
+        return arguments
+    
+    try:
+        return json.loads(arguments)
+    except (json.JSONDecodeError, ValueError):
+        return arguments
+
+
+def _process_function_calls(resp: Any) -> Any:
+    """
+    处理响应中的 function_call 和 tool_calls，将 arguments 从 JSON 字符串解析为对象
+
+    Args:
+        resp: 响应对象（字典或模型）
+
+    Returns:
+        处理后的响应对象
+    """
+    if isinstance(resp, dict):
+        choices = resp.get("choices", [])
+        for choice in choices:
+            message = choice.get("message", {})
+            
+            # 处理 function_call
+            fc = message.get("function_call")
+            if fc and isinstance(fc, dict):
+                args = fc.get("arguments")
+                if args is not None:
+                    fc["arguments"] = _parse_arguments_if_json(args)
+            
+            # 处理 tool_calls
+            tcs = message.get("tool_calls", [])
+            for tc in tcs:
+                if isinstance(tc, dict):
+                    func = tc.get("function", {})
+                    if isinstance(func, dict):
+                        args = func.get("arguments")
+                        if args is not None:
+                            func["arguments"] = _parse_arguments_if_json(args)
+    elif hasattr(resp, 'model_dump'):
+        data = resp.model_dump()
+        return _process_function_calls(data)
+    
+    return resp
+
+
+# ==================== 数据库写入函数 ====================
+
+def _write_usage(uid: str, model: str, used_model: str, tokens: int, cost: float):
+    """写入用量统计
+
+    Args:
+        uid: 用户 ID
+        model: 请求模型名称
+        used_model: 实际使用的模型名称
+        tokens: 消耗的 token 数量
+        cost: 花费成本
+    """
+    try:
+        # 频控计数
+        incr_rate_limit(uid, model, used_model, tokens, cost)
+
+        sess = sync_session()
+
+        stmt = (
+            insert(UsageStat)
+            .values(
+                id=str(uuid.uuid4()),
+                user_id=uid,
+                model_name=model,
+                request_count=1,
+                total_tokens=tokens,
+                total_cost=cost,
+                last_used=func.now(),
+            )
+            .on_conflict_do_update(
+                index_elements=["user_id", "model_name"],
+                set_={
+                    "request_count": UsageStat.request_count + 1,
+                    "total_tokens": UsageStat.total_tokens + tokens,
+                    "total_cost": UsageStat.total_cost + cost,
+                    "last_used": func.now(),
+                },
+            )
+        )
+
+        sess.execute(stmt)
+        sess.commit()
+    except Exception as e:
+        logger.error(f"[usage_stat_error] {e}")
+    finally:
+        sess.close()
+
+
+def _write_completion_log(
+    *,
+    uid: str,
+    model: str,
+    request_data: dict,
+    messages: list | None,
+    tools: list | None,
+    response_data: dict | None,
+    full_response: list | dict | None,
+    total_tokens: int,
+    cost: float,
+    status: str,
+    error_message: str | None = None,
+    duration: int = 0,
+):
+    """
+    记录一次 completion 的完整日志（支持 stream / non-stream）
+
+    Args:
+        uid: 用户 ID
+        model: 模型名称
+        request_data: 请求数据
+        messages: 消息列表
+        tools: 工具列表
+        response_data: 响应数据
+        full_response: 完整响应
+        total_tokens: 总 token 数量
+        cost: 成本
+        status: 状态（success/error）
+        error_message: 错误消息
+        duration: 耗时（毫秒）
+    """
+    try:
+        sess = sync_session()
+
+        # token 拆分（如果能拿到）
+        request_tokens = 0
+        response_tokens = 0
+        if isinstance(full_response, dict) and "usage" in full_response:
+            usage = full_response.get("usage") or {}
+            request_tokens = usage.get("prompt_tokens", 0)
+            response_tokens = usage.get("completion_tokens", 0)
+
+        log_entry = CompletionLog(
+            id=str(uuid.uuid4()),
+            user_id=uid,
+            model_name=model,
+            request_data=make_json_safe(request_data),
+            response_data=make_json_safe(response_data),
+            request_tokens=request_tokens,
+            response_tokens=response_tokens,
+            total_tokens=total_tokens,
+            cost=cost,
+            status=status,
+            error_message=str(error_message) if error_message else None,
+            duration=duration,
+        )
+        sess.add(log_entry)
+        sess.flush()
+
+        detail_entry = CompletionDetail(
+            completion_log_id=log_entry.id,
+            messages=make_json_safe(messages),
+            tools=make_json_safe(tools),
+            full_response=make_json_safe(full_response),
+        )
+        sess.add(detail_entry)
+
+        sess.commit()
+        sess.close()
+
+    except Exception as e:
+        print(f"[completion_log_error] {e}")
+
+
+# ==================== 流式处理函数 ====================
+
+async def _log_stream_completion(
+    uid: str,
+    used_model: str,
+    request_data: dict,
+    choices: list,
+    usage: dict,
+    tokens: int,
+    cost: float,
+    status: str,
+    error_message: str | None,
+    duration: int,
+):
+    """后台记录流式完成日志（不阻塞主响应）
+
+    Args:
+        uid: 用户 ID
+        used_model: 使用的模型
+        request_data: 请求数据
+        choices: 响应 choices
+        usage: usage 信息
+        tokens: token 数量
+        cost: 成本
+        status: 状态
+        error_message: 错误消息
+        duration: 耗时
+    """
+    try:
+        model = request_data.get("model", "")
+        # 从 request_data 中提取 messages 和 tools
+        messages = request_data.get("messages", [])
+        tools = request_data.get("tools", None)
+        # 使用 to_thread 避免阻塞事件循环
+        await asyncio.to_thread(
+            _write_completion_log,
+            uid=uid,
+            model=model,
+            request_data=request_data,
+            messages=messages,
+            tools=tools,
+            response_data=None,
+            full_response={"usage": usage, "choices": choices},
+            total_tokens=tokens,
+            cost=cost,
+            status=status,
+            error_message=error_message,
+            duration=duration,
+        )
+
+        # 记录用量统计
+        await asyncio.to_thread(
+            _write_usage, uid, model, used_model, tokens, cost
+        )
+
+    except Exception as e:
+        logger.error(f"[stream_log_error] Failed to log stream completion: {e}")
+
+
+async def _handle_stream(u: dict, request_data: dict, params: dict):
+    """处理流式响应
+
+    Args:
+        u: 用户信息字典
+        request_data: 请求数据
+        params: API 调用参数
+
+    Returns:
+        StreamingResponse: 流式响应对象
+    """
+    client = OpenAI(api_key=params.pop("api_key"), base_url=params.pop("base_url"))
+    collector = StreamingLogCollector()
+
+    def convert_to_streaming_response(response_object: Optional[dict] = None):
+        # used for yielding Cache hits when stream == True
+        if response_object is None:
+            raise Exception("Error in response object format")
+        model_response_object = ModelResponse(stream=True)
+        choice_list = []
+        for idx, choice in enumerate(response_object["choices"]):
+            delta = Delta(
+                content=choice["message"].get("content", None),
+                role=choice["message"]["role"],
+                function_call=choice["message"].get("function_call", None),
+                tool_calls=choice["message"].get("tool_calls", None),
+            )
+            finish_reason = choice.get("finish_reason", None)
+            if finish_reason == None:
+                finish_reason = choice.get("finish_details")
+            logprobs = choice.get("logprobs", None)
+            enhancements = choice.get("enhancements", None)
+            choice = StreamingChoices(
+                finish_reason=finish_reason,
+                index=idx,
+                delta=delta,
+                logprobs=logprobs,
+                enhancements=enhancements,
+            )
+
+            choice_list.append(choice)
+        model_response_object.choices = choice_list
+
+        if "usage" in response_object and response_object["usage"] is not None:
+            model_response_object.usage.completion_tokens = response_object["usage"].get("completion_tokens",
+                                                                                         0)  # type: ignore
+            model_response_object.usage.prompt_tokens = response_object["usage"].get("prompt_tokens", 0)  # type: ignore
+            model_response_object.usage.total_tokens = response_object["usage"].get("total_tokens", 0)  # type: ignore
+
+        if "id" in response_object:
+            model_response_object.id = response_object["id"]
+
+        if "created" in response_object:
+            model_response_object.created = response_object["created"]
+
+        if "system_fingerprint" in response_object:
+            model_response_object.system_fingerprint = response_object["system_fingerprint"]
+
+        if "model" in response_object:
+            model_response_object.model = response_object["model"]
+        yield model_response_object
+    async def stream_generator() -> AsyncGenerator[str, None]:
+        """异步生成器：在后台线程迭代同步 Stream，通过队列转发
+
+        使用 StreamingLogCollector 解决变量作用域问题，确保状态正确记录。
+        """
+        queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+        DONE = object()
+
+        def _sync_iter():
+            """在后台线程中执行同步迭代"""
+            try:
+                stream = client.chat.completions.create(**params)
+                for chunk in stream:
+                    queue.put_nowait(chunk)
+                    collector.add_chunk(chunk)
+                queue.put_nowait(DONE)
+                collector.set_success()
+            except Exception as e:
+                queue.put_nowait(e)
+                collector.set_error(str(e))
+            finally:
+                try:
+                    queue.put_nowait(DONE)
+                except asyncio.QueueShutDown:
+                    pass
+
+        # 启动后台线程执行同步迭代
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, _sync_iter)
+
+        # 异步消费队列
+        while True:
+            item = await queue.get()
+            if item is DONE:
+                yield "data: [DONE]\n\n"
+                break
+            if isinstance(item, Exception):
+                error_message = str(item)
+                collector.set_error(error_message)
+                err = {"error": {"message": error_message, "type": "stream_error"}}
+                yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+                break
+
+            # 使用 OpenAI SDK 内置的 model_dump_json 或直接转字典后序列化
+            chunk_data = item.model_dump(exclude_unset=True)
+            yield convert_to_streaming_response(chunk_data)
+            # yield f"data: {chunk_str}\n\n"
+
+        # 后台任务记录日志
+        request_data['messages']=params.get('messages',[])
+        request_data['tools']=params.get('tools',None)
+        request_data['tool_choice']=params.get('tool_choice',None)
+        asyncio.create_task(
+            _log_stream_completion(
+                uid=u["user_id"],
+                used_model=params.get("model", ""),
+                request_data=request_data,
+                choices=collector.response_choices,
+                usage=collector.usage,
+                tokens=collector.tokens,
+                cost=collector.cost,
+                status=collector.status,
+                error_message=collector.error_message,
+                duration=collector.duration,
+            )
+        )
+
+    return StreamingResponse(
+        stream_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ==================== 非流式处理函数 ====================
+
+async def _handle_non_stream(u: dict, request_data: dict, params: dict):
+    """处理非流式响应
+
+    Args:
+        u: 用户信息字典
+        request_data: 请求数据
+        params: API 调用参数
+
+    Returns:
+        llm 响应对象
+
+    Raises:
+        HTTPException: 当请求失败时抛出
+    """
+    start_time = time.time()
+    status = "error"
+    error_message: str | None = None
+    tokens = 0
+    cost = 0
+    response_data = None
+    resp = None
+
+    try:
+        resp = litellm.completion(**params)
+
+        # 安全地获取 tokens 和 choices
+        if hasattr(resp, 'usage') and resp.usage:
+            tokens = resp.usage.total_tokens if hasattr(resp.usage, 'total_tokens') else 0
+        else:
+            tokens = 0
+        
+        # 安全地获取 choices
+        if hasattr(resp, 'choices'):
+            response_data = {"choices": resp.choices}
+        elif isinstance(resp, dict) and 'choices' in resp:
+            response_data = {"choices": resp['choices']}
+        else:
+            # 如果 resp 没有 choices，记录警告并设置空列表
+            logger.warning(f"[WARNING] resp has no choices attribute, resp type: {type(resp)}")
+            response_data = {"choices": []}
+        
+        status = "success"
+        return resp
+
+    except Exception as e:
+        logger.exception("Completion error")
+        error_message = str(e)
+        status = "error"
+        resp = {"code": 500, "message": error_message}
+        raise HTTPException(500, f"completion error: {e}")
+
+    finally:
+        duration = int((time.time() - start_time) * 1000)  # 转换为毫秒
+
+        # 后台记录用量统计
+        loop = asyncio.get_event_loop()
+        loop.create_task(
+            asyncio.to_thread(
+                _write_usage,
+                u["user_id"],
+                params.get("model"),
+                request_data.get("model", ""),
+                tokens,
+                cost,
+            )
+        )
+
+        # 后台记录 completion 日志
+        loop.create_task(
+            asyncio.to_thread(
+                _write_completion_log,
+                uid=u["user_id"],
+                model=request_data.get("model", ""),
+                request_data=request_data,
+                messages=None,
+                tools=None,
+                response_data=None,
+                full_response=(
+                    resp.model_dump() if hasattr(resp, "model_dump") else resp
+                ),
+                total_tokens=tokens,
+                cost=cost,
+                status=status,
+                error_message=error_message,
+                duration=duration,
+            )
+        )
+
+
+# ==================== 路由 ====================
+
+router = APIRouter()
+
+
+@router.post("/chat/completions")
+async def completions(req: CompletionRequest, u=Depends(authenticate_user)):
+    """Chat Completions API
+
+    兼容 OpenAI 的 `/v1/chat/completions` 端点。
+
+    Args:
+        req: Completion 请求数据
+        u: 认证用户信息
+
+    Returns:
+        流式或非流式响应
+
+    Raises:
+        HTTPException: 当模型不存在或无可用端点时
+    """
+    logger.info(
+        f"Completions request from user {u['user_id']} for model {req.model}"
+    )
+
+    cfg = get_model_config(req.model)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Model {req.model} not found")
+
+    endpoint = await check_rate_limit(u, cfg)
+
+    if endpoint is None:
+        raise HTTPException(status_code=500, detail="没有可用模型")
+
+    model = endpoint.model
+    api_key = endpoint.api_key
+    base_url = endpoint.base_url
+    max_tokens = min(cfg.default_max_tokens, endpoint.max_tokens)
+    provider = endpoint.provider
+
+    params = {
+        **req.model_dump(exclude_none=True),
+        "model": f"{model}",
+        "api_key": api_key,
+        "base_url": base_url,
+        "max_tokens": max_tokens,
+        "stream": req.stream,
+    }
+
+    request_data = {
+        "model": req.model,
+        "messages_count": len(req.messages or []),
+        "temperature": req.temperature,
+        "stream": req.stream,
+        "top_p": req.top_p,
+        "response_format": req.response_format,
+        "provider": provider,
+    }
+
+    # 非流式响应
+    if not req.stream:
+        params["model"]= f"{endpoint.provider}/{model}"
+        return await _handle_non_stream(u, request_data, params)
+
+    # 流式响应
+    return await _handle_stream(u, request_data, params)
+
+
+@router.get("/models", response_model=ModelListResponse)
+async def list_models():
+    """列出所有可用的模型
+
+    Returns:
+        ModelListResponse: 包含所有可用模型的列表
+    """
+    model_names = get_all_models()
+    model_data = [
+        ModelInfo(id=model_name, object="model", created=0, owned_by="")
+        for model_name in model_names
+    ]
+
+    return ModelListResponse(data=model_data)
+
+
+@router.post("/embeddings")
+async def embeddings(req: EmbeddingRequest, u=Depends(authenticate_user)):
+    """Embeddings API
+
+    兼容 OpenAI 的 `/v1/embeddings` 端点。
+
+    Args:
+        req: Embedding 请求数据
+        u: 认证用户信息
+
+    Returns:
+        Embedding 响应
+
+    Raises:
+        HTTPException: 当模型不存在或请求失败时
+    """
+    logger.info(f"embedding request from user {u['user_id']} for model {req.model}")
+
+    cfg = get_model_config(req.model)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Model {req.model} not found")
+
+    endpoint = await check_rate_limit(u, cfg)
+
+    if endpoint is None:
+        raise HTTPException(status_code=500, detail="没有可用模型")
+
+    model = endpoint.model
+    api_key = endpoint.api_key
+    base_url = endpoint.base_url
+    provider = endpoint.provider
+
+    params = {
+        **req.model_dump(exclude_none=True),
+        "model": model,
+        "input": req.input,
+    }
+
+    try:
+        if provider == "local":
+            resp = embedding_encode(
+                req.model, req.input if isinstance(req.input, list) else [req.input]
+            )
+            tokens = 0
+        else:
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            resp = client.embeddings.create(**params)
+            tokens = resp.usage.total_tokens if resp.usage else 0
+
+    except Exception as e:
+        logger.error(
+            f"embeddings error for user {u['user_id']}, model {req.model}: {e}"
+        )
+        logger.error(e)
+        raise HTTPException(500, f"embeddings error: {e}")
+
+    cost = 0
+    # 异步落库 & 计数
+    loop = asyncio.get_event_loop()
+    loop.create_task(
+        asyncio.to_thread(
+            _write_usage, u["user_id"], model, req.model, tokens, cost
+        )
+    )
+
+    return resp
