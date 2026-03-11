@@ -19,18 +19,32 @@ export default function Header({ onNavigate, user }) {
             数据概览
           </button>
           <button
+            onClick={() => onNavigate('models')}
+            className="px-4 py-2 rounded-lg text-gray-300 hover:bg-dark-800 hover:text-white transition-colors"
+          >
+            模型管理
+          </button>
+          <button
             onClick={() => onNavigate('api-keys')}
             className="px-4 py-2 rounded-lg text-gray-300 hover:bg-dark-800 hover:text-white transition-colors"
           >
-            APIKeys
+            API密钥
           </button>
           {user && user.role === 'admin' && (
-            <button
-              onClick={() => onNavigate('users')}
-              className="px-4 py-2 rounded-lg text-gray-300 hover:bg-dark-800 hover:text-white transition-colors"
-            >
-              用户信息
-            </button>
+            <>
+              <button
+                onClick={() => onNavigate('users')}
+                className="px-4 py-2 rounded-lg text-gray-300 hover:bg-dark-800 hover:text-white transition-colors"
+              >
+                用户管理
+              </button>
+              <button
+                onClick={() => onNavigate('model-logs')}
+                className="px-4 py-2 rounded-lg text-gray-300 hover:bg-dark-800 hover:text-white transition-colors"
+              >
+                日志
+              </button>
+            </>
           )}
         </nav>
         

@@ -37,6 +37,7 @@ openai==2.14.0
 packaging==25.0
 passlib==1.7.4
 propcache==0.4.1
+prometheus-client==0.21.1
 psycopg2-binary==2.9.11
 pyasn1==0.6.1
 pydantic==2.12.5

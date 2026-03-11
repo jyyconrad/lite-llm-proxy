@@ -16,6 +16,13 @@ from ..dependencies import authenticate_user, check_rate_limit, get_logger
 from ..local_model_manage import embedding_encode
 from ..models import CompletionRequest, EmbeddingRequest
 from ..litellm_logger import custom_logger
+from ..resilience import (
+    get_circuit_breaker,
+    get_failover_manager,
+    RetryConfig,
+    calculate_retry_delay,
+    CircuitBreakerConfig,
+)
 from config_manager import get_all_models, get_model_config
 from data import CompletionDetail, CompletionLog, UsageStat, sync_session
 
@@ -82,6 +89,58 @@ router = APIRouter()
 litellm.set_verbose = False
 litellm.callbacks = [custom_logger]
 
+# 重试配置
+retry_config = RetryConfig(max_retries=2, initial_delay=0.5, max_delay=5.0)
+
+
+async def _call_llm_with_retry(params: dict, uid: str, req_model: str, is_stream: bool):
+    """使用重试机制调用 LLM"""
+    import asyncio
+
+    # 获取或创建熔断器
+    model_name = params.get("model", "unknown")
+    cb = get_circuit_breaker(model_name)
+
+    last_error = None
+
+    for attempt in range(retry_config.max_retries + 1):
+        # 检查熔断器状态
+        if not cb.can_execute():
+            logger.warning(
+                f"Circuit breaker open for {model_name}, attempt {attempt + 1}"
+            )
+            if attempt < retry_config.max_retries:
+                await asyncio.sleep(calculate_retry_delay(attempt, retry_config))
+                continue
+            raise HTTPException(
+                status_code=503,
+                detail="Service temporarily unavailable (circuit breaker open)",
+            )
+
+        try:
+            if is_stream:
+                return await litellm.acompletion(
+                    **params, max_retries=0, user_id=uid, req_model=req_model
+                )
+            else:
+                return await litellm.acompletion(
+                    **params, max_retries=0, user_id=uid, req_model=req_model
+                )
+        except Exception as e:
+            cb.record_failure()
+            last_error = e
+            logger.warning(
+                f"LLM call failed (attempt {attempt + 1}/{retry_config.max_retries + 1}): {e}"
+            )
+
+            if attempt < retry_config.max_retries:
+                delay = calculate_retry_delay(attempt, retry_config)
+                await asyncio.sleep(delay)
+            continue
+
+    cb.record_failure()
+    raise last_error
+
 
 @router.post("/chat/completions")
 async def completions(req: CompletionRequest, u=Depends(authenticate_user)):
@@ -114,7 +173,7 @@ async def completions(req: CompletionRequest, u=Depends(authenticate_user)):
     model = endpoint.model
     api_key = endpoint.api_key
     base_url = endpoint.base_url
-    max_tokens = min(cfg.default_max_tokens, endpoint.max_tokens)
+    max_tokens = min(cfg.default_max_tokens, endpoint.max_tokens or 999999)
     provider = endpoint.provider
 
     params = {
@@ -126,25 +185,30 @@ async def completions(req: CompletionRequest, u=Depends(authenticate_user)):
         "stream": req.stream,
     }
     if params.get("stream"):
-        # 流式响应 - 在异步环境中使用 acompletion
-        stream = await litellm.acompletion(
-            **params, max_retries=0, user_id=uid, req_model=req.model
-        )
+        # 流式响应 - 使用重试机制
+        stream = await _call_llm_with_retry(params, uid, req.model, True)
 
         async def generate():
-            async for chunk in stream:
-                processed_chunk = _process_function_calls(chunk)
-                chunk_str = (
-                    processed_chunk.model_dump_json()
-                    if hasattr(processed_chunk, "model_dump_json")
-                    else json.dumps(processed_chunk)
-                )
-                yield f"data: {chunk_str}\n\n"
+            try:
+                async for chunk in stream:
+                    processed_chunk = _process_function_calls(chunk)
+                    chunk_str = (
+                        processed_chunk.model_dump_json()
+                        if hasattr(processed_chunk, "model_dump_json")
+                        else json.dumps(processed_chunk)
+                    )
+                    yield f"data: {chunk_str}\n\n"
+            except Exception as e:
+                logger.error(f"Stream error: {e}")
+                error_msg = str(e).replace('"', '\\"')
+                yield 'data: {"error": {"message": "' + error_msg + '"}}\n\n'
+            finally:
+                yield "data: [DONE]\n\n"
 
         return StreamingResponse(generate(), media_type="text/event-stream")
-    resp = await litellm.acompletion(
-        **params, max_retries=0, user_id=uid, req_model=req.model
-    )
+
+    # 非流式响应 - 使用重试机制
+    resp = await _call_llm_with_retry(params, uid, req.model, False)
     return _process_function_calls(resp)
 
 

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import Header from './components/Header'
 import Dashboard from './components/Dashboard'
 import ModelLogs from './pages/ModelLogs'
+import Models from './pages/Models'
 import Users from './pages/Users'
 import APIKeys from './pages/APIKeys'
 import Login from './pages/Login'
@@ -56,6 +57,7 @@ export default function App() {
         {currentPage === 'users' && <Users />}
         {currentPage === 'api-keys' && <APIKeys />}
         {currentPage === 'model-logs' && <ModelLogs user={user} onNavigate={handleNavigate} />}
+        {currentPage === 'models' && <Models user={user} onNavigate={handleNavigate} />}
         {currentPage === 'profile' && <Profile />}
       </main>
     </div>

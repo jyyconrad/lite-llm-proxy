@@ -2,6 +2,7 @@
 
 用于记录 LLM 请求的成功和失败事件，并将日志写入数据库。
 """
+
 import asyncio
 import json
 import uuid
@@ -11,7 +12,7 @@ from litellm.integrations.custom_logger import CustomLogger
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
 
-from .dependencies import get_logger, incr_rate_limit
+from .dependencies import get_logger, incr_rate_limit_sync
 from data import CompletionDetail, CompletionLog, UsageStat, sync_session
 
 
@@ -51,7 +52,7 @@ def make_json_safe(obj: Any) -> Any:
     return str(obj)
 
 
-def _write_usage(uid: str, req_model:str,model: str, tokens: int, cost: float):
+def _write_usage(uid: str, req_model: str, model: str, tokens: int, cost: float):
     """写入用量统计
 
     Args:
@@ -61,7 +62,7 @@ def _write_usage(uid: str, req_model:str,model: str, tokens: int, cost: float):
         cost: 花费成本
     """
     try:
-        incr_rate_limit(uid, req_model, model, tokens, cost)
+        incr_rate_limit_sync(uid, req_model, model, tokens, cost)
         sess = sync_session()
 
         stmt = (
@@ -178,8 +179,10 @@ class LiteLLMCustomLogger(CustomLogger):
     def __init__(self):
         super().__init__()
         self.logger = logger
-    
-    def log_usage(self, user_id: str, req_model:str,model:str, tokens: int, cost: float):
+
+    def log_usage(
+        self, user_id: str, req_model: str, model: str, tokens: int, cost: float
+    ):
         loop = asyncio.get_event_loop()
         self.logger.info(f"{user_id},{req_model},{model},{tokens}")
         # 写入用量统计
@@ -217,10 +220,10 @@ class LiteLLMCustomLogger(CustomLogger):
             completion_tokens = 0
             total_tokens = 0
             cost = 0.0
-            extra_body = kwargs.get('extra_body', {})
+            extra_body = kwargs.get("extra_body", {})
 
-            user_id=user_id if  user_id else extra_body.get("user_id","unknown")
-            req_model=req_model if  req_model else extra_body.get("req_model",model)
+            user_id = user_id if user_id else extra_body.get("user_id", "unknown")
+            req_model = req_model if req_model else extra_body.get("req_model", model)
 
             if response_obj and hasattr(response_obj, "usage"):
                 usage = response_obj.usage
@@ -244,7 +247,7 @@ class LiteLLMCustomLogger(CustomLogger):
 
             # 异步写入数据库（不阻塞主流程）
             loop = asyncio.get_event_loop()
-            req_data={
+            req_data = {
                 "user_id": user_id,
                 "model": req_model,
                 "messages": messages,
@@ -260,7 +263,9 @@ class LiteLLMCustomLogger(CustomLogger):
                     tools=kwargs.get("tools", None),
                     response_data=None,
                     full_response=(
-                        response_obj.model_dump() if hasattr(response_obj, "model_dump") else response_obj
+                        response_obj.model_dump()
+                        if hasattr(response_obj, "model_dump")
+                        else response_obj
                     ),
                     total_tokens=total_tokens,
                     cost=cost,
@@ -272,7 +277,9 @@ class LiteLLMCustomLogger(CustomLogger):
 
             # 写入用量统计
             loop.create_task(
-                asyncio.to_thread(_write_usage, user_id, req_model,model, total_tokens, cost)
+                asyncio.to_thread(
+                    _write_usage, user_id, req_model, model, total_tokens, cost
+                )
             )
 
         except Exception as e:
@@ -306,9 +313,7 @@ class LiteLLMCustomLogger(CustomLogger):
             duration_str = f"duration: {duration:.2f}s" if duration is not None else ""
 
             self.logger.error(
-                f"[LiteLLM] Failure - model: {model}, "
-                f"error: {error}, "
-                f"{duration_str}"
+                f"[LiteLLM] Failure - model: {model}, error: {error}, {duration_str}"
             )
 
             # 异步写入数据库（不阻塞主流程）

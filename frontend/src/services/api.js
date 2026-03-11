@@ -84,6 +84,7 @@ class API {
   async disableOwnAPIKey(keyId) { return this.request(`/auth/api-keys/${keyId}/disable`, 'PATCH') }
   async enableOwnAPIKey(keyId) { return this.request(`/auth/api-keys/${keyId}/enable`, 'PATCH') }
   async getModels() { return this.request('/models') }
+  async getAllModels() { return this.request('/models/all') }
 }
 
 const api = new API()

@@ -2,28 +2,39 @@
 """
 配置管理器，用于加载和缓存配置文件
 """
+
 from typing import Dict, Any, Optional, List, Union, Literal
 import yaml
 import os
 import threading
+import time
 import warnings
+from functools import lru_cache
 from pydantic import BaseModel, Field, field_validator, model_validator
-from data.model_info import ModelConfig,  ModelInfoList, ModelEndPoint
+from data.model_info import ModelConfig, ModelInfoList, ModelEndPoint
+
+
 # --------------------------------------------------------------------------- #
 # 配置管理器
 # --------------------------------------------------------------------------- #
 class ConfigManager:
     """配置管理器，用于加载和缓存配置文件"""
-    
+
+    # 缓存 TTL（秒）
+    CACHE_TTL = 60
+
     def __init__(self, config_path: str = "./litellm_config.yaml"):
         self.config_path = config_path
         self.config_cache: Dict[str, Any] = {}
         self.models_config: Dict[str, ModelConfig] = {}
         self.cache_lock = threading.Lock()
         self.last_modified = 0
+        self.last_check_time = 0  # 上次检查文件修改的时间
         self.load_config()
-        
-    def _convert_legacy_model_config(self, model_dict: Dict[str, Any]) -> Dict[str, Any]:
+
+    def _convert_legacy_model_config(
+        self, model_dict: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """
         将旧格式的模型配置转换为 ModelConfig 兼容格式。
         支持旧格式（含 model_info）和新格式（单节点/多节点）。
@@ -68,18 +79,18 @@ class ConfigManager:
 
         # 新格式处理：确保缺失字段有默认值
         result = dict(model_dict)
-        
+
         # 确保 support_types 存在
         if "support_types" not in result:
             result["support_types"] = ["text"]
         elif isinstance(result["support_types"], str):
             # 如果是字符串，转换为列表
             result["support_types"] = [result["support_types"]]
-        
+
         # 确保 description 存在
         if "description" not in result:
             result["description"] = f"模型 {result['model_name']}"
-        
+
         # 确保 default_rpm, default_tpm, default_max_tokens 存在
         if "default_rpm" not in result:
             result["default_rpm"] = 10
@@ -87,7 +98,7 @@ class ConfigManager:
             result["default_tpm"] = 100000
         if "default_max_tokens" not in result:
             result["default_max_tokens"] = 32 * 1024
-        
+
         # 处理 litellm_params
         litellm_params = result.get("litellm_params", {})
         # 如果顶层有 provider 字段，将其移动到 litellm_params（如果缺失）
@@ -96,7 +107,7 @@ class ConfigManager:
                 litellm_params["provider"] = result["provider"]
             # 删除顶层的 provider 字段，因为 ModelConfig 不允许额外的字段
             del result["provider"]
-        
+
         if isinstance(litellm_params, dict):
             # 检查是否包含 endpoints 键（多节点模式）
             if "endpoints" in litellm_params:
@@ -144,28 +155,28 @@ class ConfigManager:
                 if "tpm" not in endpoint:
                     endpoint["tpm"] = result["default_tpm"]
             result["litellm_params"] = {"endpoints": litellm_params}
-        
+
         return result
-    
+
     def load_config(self) -> None:
         """加载配置文件并缓存，使用 ModelConfig 验证"""
         try:
             if not os.path.exists(self.config_path):
                 raise FileNotFoundError(f"Config file not found: {self.config_path}")
-                
+
             # 检查文件是否被修改
             current_modified = os.path.getmtime(self.config_path)
             if current_modified <= self.last_modified:
                 return  # 文件未被修改，无需重新加载
-                
-            with open(self.config_path, 'r', encoding='utf-8') as f:
+
+            with open(self.config_path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
-            
+
             with self.cache_lock:
                 self.config_cache = config
                 # 提取模型配置并验证
                 validated_models: Dict[str, ModelConfig] = {}
-                for model in config.get('model_list', []):
+                for model in config.get("model_list", []):
                     try:
                         # 尝试转换为新格式
                         converted = self._convert_legacy_model_config(model)
@@ -173,54 +184,67 @@ class ConfigManager:
                         validated = ModelConfig.model_validate(converted)
                         validated_models[validated.model_name] = validated
                     except Exception as e:
-                        warnings.warn(f"模型配置验证失败 {model.get('model_name', 'unknown')}: {e}")
+                        warnings.warn(
+                            f"模型配置验证失败 {model.get('model_name', 'unknown')}: {e}"
+                        )
                         # 如果验证失败，跳过该模型，不加入配置
                         continue
-                
+
                 self.models_config = validated_models
                 self.last_modified = current_modified
-                
+
             print(f"Configuration loaded successfully from {self.config_path}")
         except Exception as e:
             print(f"Error loading config: {str(e)}")
             raise
-    
+
     def get_model_config(self, model_name: str) -> Optional[ModelConfig]:
         """获取指定模型的配置"""
         with self.cache_lock:
             return self.models_config.get(model_name)
-    
+
     def get_all_models(self) -> list:
         """获取所有模型名称"""
         with self.cache_lock:
             return list(self.models_config.keys())
-    
+
     def get_all_model_configs(self) -> Dict[str, ModelConfig]:
         """获取所有模型配置"""
         with self.cache_lock:
             return self.models_config
-    
+
     def refresh_if_needed(self) -> None:
-        """如果配置文件有更新则刷新缓存"""
+        """如果配置文件有更新则刷新缓存（带时间间隔限制）"""
         try:
+            current_time = time.time()
+
+            # 每 CACHE_TTL 秒才检查一次文件修改时间
+            if current_time - self.last_check_time < self.CACHE_TTL:
+                return
+
+            self.last_check_time = current_time
             current_modified = os.path.getmtime(self.config_path)
             if current_modified > self.last_modified:
                 self.load_config()
         except Exception as e:
             print(f"Error checking config file modification: {str(e)}")
 
+
 # 全局配置管理器实例
 config_manager = ConfigManager()
+
 
 def get_model_config(model_name: str) -> Optional[ModelConfig]:
     """获取模型配置的便捷函数"""
     config_manager.refresh_if_needed()
     return config_manager.get_model_config(model_name)
 
+
 def get_all_model_configs() -> Dict[str, ModelConfig]:
     """获取所有模型配置的便捷函数"""
     config_manager.refresh_if_needed()
     return config_manager.get_all_model_configs()
+
 
 def get_all_models() -> list:
     """获取所有模型的便捷函数"""
