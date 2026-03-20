@@ -6,6 +6,10 @@ export default function APIKeys(){
   const [loading, setLoading] = useState(true)
   const [currentUser, setCurrentUser] = useState(null)
 
+  // 新增：展开显示的密钥 ID 和复制状态
+  const [expandedKeyId, setExpandedKeyId] = useState(null)
+  const [copyingKeyId, setCopyingKeyId] = useState(null)
+
   useEffect(()=>{ init() }, [])
   async function init(){
     setLoading(true)
@@ -29,21 +33,45 @@ export default function APIKeys(){
   }
 
   async function copyKey(k){
-    try{
-      if(k.api_key){
-        await navigator.clipboard.writeText(k.api_key)
-        alert('Copied')
+    // 如果已经展开，则收起
+    if (expandedKeyId === k.id) {
+      setExpandedKeyId(null)
+      setCopyingKeyId(null)
+      return
+    }
+
+    try {
+      const keyToCopy = k.api_key;
+      if(keyToCopy){
+        // 先展开显示完整密钥
+        setExpandedKeyId(k.id)
+        setCopyingKeyId(k.id)
+
+        // 执行复制
+        await navigator.clipboard.writeText(keyToCopy)
+
+        // 3 秒后自动收起
+        setTimeout(() => {
+          setExpandedKeyId(null)
+          setCopyingKeyId(null)
+        }, 3000)
         return
       }
-      // fallback: try fetch user key from API (admin-only)
+
+      // fallback: 尝试从 API 获取
       const res = await api.getUserAPIKey(k.user_id)
       if(res && res.api_key){
+        setExpandedKeyId(k.id)
         await navigator.clipboard.writeText(res.api_key)
-        alert('Copied')
+        setTimeout(() => setExpandedKeyId(null), 3000)
       } else {
         alert('无法获取密钥值')
       }
-    }catch(e){ alert(String(e)) }
+    }catch(e){
+      alert(String(e))
+      setExpandedKeyId(null)
+      setCopyingKeyId(null)
+    }
   }
 
   async function toggleKey(k){
@@ -62,7 +90,7 @@ export default function APIKeys(){
     if (!apiKey || apiKey.length <= 8) {
       return apiKey;
     }
-    
+
     const prefix = apiKey.substring(0, 4);
     const suffix = apiKey.substring(apiKey.length - 4);
     return `${prefix}****${suffix}`;
@@ -73,7 +101,7 @@ export default function APIKeys(){
       <div className="bg-dark-800 rounded-xl p-6 border border-dark-700 shadow-lg mb-6">
         <h2 className="text-xl font-bold text-white mb-4">创建 API 密钥</h2>
         <form onSubmit={createKey} className="flex flex-col sm:flex-row gap-4 items-start sm:items-center">
-          <div className="text-gray-400">用户: {currentUser? currentUser.username : '加载中...'}</div>
+          <div className="text-gray-400">用户：{currentUser? currentUser.username : '加载中...'}</div>
           <button
             type="submit"
             className="px-4 py-2 bg-primary-500 hover:bg-primary-600 text-dark-950 rounded-lg transition-colors font-medium"
@@ -105,7 +133,30 @@ export default function APIKeys(){
                 </tr>
               ) : keys.map(k => (
                 <tr key={k.id} className="border-b border-dark-700 hover:bg-dark-750 transition-colors">
-                  <td className="py-3 px-4 text-white font-mono text-sm">{maskApiKey(k.id)}</td>
+                  <td className="py-3 px-4 text-white font-mono text-sm">
+                    {/* 掩码显示 */}
+                    {maskApiKey(k.api_key || k.id)}
+
+                    {/* 展开状态下的完整密钥显示 */}
+                    {expandedKeyId === k.id && (
+                      <div className="mt-2 p-3 bg-primary-500/20 border border-primary-500/50 rounded-lg">
+                        <div className="flex items-center justify-between mb-2">
+                          <p className="text-xs text-gray-300 font-medium">完整密钥（3 秒后自动隐藏）：</p>
+                          {copyingKeyId === k.id && (
+                            <span className="text-green-400 text-xs flex items-center gap-1">
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                              </svg>
+                              已复制!
+                            </span>
+                          )}
+                        </div>
+                        <code className="text-white text-sm break-all bg-dark-800/50 px-3 py-2 rounded block font-mono">
+                          {k.api_key || '加载中...'}
+                        </code>
+                      </div>
+                    )}
+                  </td>
                   <td className="py-3 px-4 text-gray-300">{k.created_at}</td>
                   <td className="py-3 px-4">
                     <span className={`px-2 py-1 rounded-full text-xs font-medium ${
@@ -120,9 +171,13 @@ export default function APIKeys(){
                     <div className="flex flex-wrap gap-2">
                       <button
                         onClick={()=>copyKey(k)}
-                        className="px-3 py-1 bg-dark-700 hover:bg-dark-600 text-gray-300 rounded-lg transition-colors text-sm"
+                        className={`px-3 py-1 rounded-lg transition-colors text-sm ${
+                          expandedKeyId === k.id
+                            ? 'bg-green-500/20 text-green-400'
+                            : 'bg-dark-700 hover:bg-dark-600 text-gray-300'
+                        }`}
                       >
-                        复制
+                        {expandedKeyId === k.id ? '已复制' : '复制'}
                       </button>
                       <button
                         onClick={()=>toggleKey(k)}
@@ -152,7 +207,3 @@ export default function APIKeys(){
     </div>
   )
 }
-
-
-
-

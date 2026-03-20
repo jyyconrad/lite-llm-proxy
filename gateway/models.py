@@ -118,3 +118,64 @@ class RecentActivity(BaseModel):
     timestamp: datetime
     success: bool
     response_time: int
+
+
+# --------------------------------------------------------------------------- #
+# 模型配置管理
+# --------------------------------------------------------------------------- #
+class ModelEndPointPydantic(BaseModel):
+    """单条模型转发节点信息"""
+    model: str
+    api_key: str
+    base_url: str
+    weight: int = 1
+    max_tokens: Optional[int] = None
+    rpm: int = 0
+    tpm: int = 0
+    dimensions: Optional[int] = None
+    provider: Optional[str] = "openai"
+
+
+class ModelInfoListPydantic(BaseModel):
+    """多节点列表"""
+    endpoints: List[ModelEndPointPydantic]
+
+
+class ModelConfigPydantic(BaseModel):
+    """模型配置 Pydantic 模型，用于 API 响应"""
+    model_config = ConfigDict(protected_namespaces=())
+
+    id: str
+    model_name: str
+    litellm_params: Union[ModelInfoListPydantic, ModelEndPointPydantic, dict]
+    support_types: List[str] = ["text"]
+    default_rpm: int = 10
+    default_tpm: int = 100000
+    default_max_tokens: int = 32768
+    description: str = "大语言模型"
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class ModelConfigCreate(BaseModel):
+    """创建模型配置的请求体"""
+    model_name: str
+    litellm_params: Union[ModelInfoListPydantic, ModelEndPointPydantic, dict]
+    support_types: List[str] = ["text"]
+    default_rpm: int = 10
+    default_tpm: int = 100000
+    default_max_tokens: int = 32768
+    description: str = "大语言模型"
+    is_active: bool = True
+
+
+class ModelConfigUpdate(BaseModel):
+    """更新模型配置的请求体"""
+    litellm_params: Optional[Union[ModelInfoListPydantic, ModelEndPointPydantic, dict]] = None
+    support_types: Optional[List[str]] = None
+    default_rpm: Optional[int] = None
+    default_tpm: Optional[int] = None
+    default_max_tokens: Optional[int] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None

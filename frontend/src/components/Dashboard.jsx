@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Select } from '@chakra-ui/react'
+import { Select, Progress } from '@chakra-ui/react'
 import api from '../services/api'
 import ModelUsage from './ModelUsage'
 import TrendChart from './TrendChart'
@@ -21,6 +21,8 @@ export default function Dashboard({ user, onNavigate }) {
   const [period, setPeriod] = useState('7d')
   const [granularity, setGranularity] = useState('day')
   const [costThreshold, setCostThreshold] = useState(1.0)
+  const [concurrentStats, setConcurrentStats] = useState({ global_concurrent: 0, model_concurrent: {}, total_concurrent: 0 })
+  const [budgetUsage, setBudgetUsage] = useState({ budget_used: 0, budget_limit: 0 })
   
   // 用户使用对比卡片的独立筛选条件
   const [userTrendPeriod, setUserTrendPeriod] = useState('7d')
@@ -31,6 +33,43 @@ export default function Dashboard({ user, onNavigate }) {
   const [modelTrendPeriod, setModelTrendPeriod] = useState('7d')
   const [modelTrendUser, setModelTrendUser] = useState('')
   const [modelTrendGranularity, setModelTrendGranularity] = useState('day')
+
+  // 获取并发统计和预算使用情况
+  useEffect(() => {
+    async function fetchRealtimeStats() {
+      try {
+        // 获取并发统计
+        const concurrent = await api.getConcurrentStats()
+        setConcurrentStats(concurrent)
+      } catch (e) {
+        console.error("获取并发统计失败:", e)
+      }
+    }
+
+    // 获取预算使用情况
+    async function fetchBudgetUsage() {
+      try {
+        const usage = await api.getStatsOverview()
+        // 从 stats/usage 获取预算信息
+        const usageData = await api.request('/admin/stats/usage')
+        if (usageData) {
+          setBudgetUsage({
+            budget_used: usageData.budget_used || 0,
+            budget_limit: usageData.budget_limit || 0
+          })
+        }
+      } catch (e) {
+        console.error("获取预算使用失败:", e)
+      }
+    }
+
+    fetchRealtimeStats()
+    fetchBudgetUsage()
+
+    // 每 10 秒刷新一次并发数据
+    const interval = setInterval(fetchRealtimeStats, 10000)
+    return () => clearInterval(interval)
+  }, [])
 
   function computeTotals(series, data){
     const totals = {}
@@ -222,19 +261,30 @@ export default function Dashboard({ user, onNavigate }) {
   }
   function formatNumber(v){
   if (v === null || v === undefined) return '-'
-  
-  // 对于 tokens 数据且数值较大时，使用简化格式
-  if (v >= 10000) {
-    return (v / 10000).toFixed(v % 10000 === 0 ? 0 : 1) + '万'
+  const num = Number(v)
+  if (isNaN(num)) return '-'
+
+  // 百万以上使用 M 格式
+  if (num >= 1000000) {
+    return (num / 1000000).toFixed(num % 1000000 === 0 ? 0 : 1) + 'M'
   }
-  
-  return Number(v).toLocaleString()
+  // 万以上使用万格式
+  if (num >= 10000) {
+    return (num / 10000).toFixed(num % 10000 === 0 ? 0 : 1) + '万'
+  }
+
+  return num.toLocaleString()
 }
 
+// 计算平均 tokens（使用原始数字计算后再格式化显示）
+  const rawTotalCalls = overview ? Number(overview.total_calls || 0) : 0
+  const rawTotalTokens = overview ? Number(overview.total_tokens || 0) : 0
   const modelCount = overview ? formatNumber(overview.model_count || (models.length || 0)) : '-'
-  const totalCalls = overview ? formatNumber(overview.total_calls) : '-'
-  const totalTokens = overview ? formatNumber(overview.total_tokens) : '-'
-  const avgTokensPerCall = (Number(totalCalls) > 0 && Number(totalTokens) > 0) ? Math.round((Number(totalTokens) / Number(totalCalls)) * 100) / 100 : ((overview && overview.avg_tokens_per_call) || '-')
+  const totalCalls = formatNumber(rawTotalCalls)
+  const totalTokens = formatNumber(rawTotalTokens)
+  const avgTokensPerCall = (rawTotalCalls > 0 && rawTotalTokens > 0)
+    ? formatNumber(Math.round(rawTotalTokens / rawTotalCalls))
+    : '-'
 
   return (
     <div className="mx-auto px-4 py-6">
@@ -297,7 +347,7 @@ export default function Dashboard({ user, onNavigate }) {
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-6">
         <div className="bg-dark-800 rounded-xl p-6 border border-dark-700 shadow-lg">
           <p className="text-gray-400 text-sm mb-1">调用模型数</p>
           <h3 className="text-2xl font-bold text-white">{modelCount}</h3>
@@ -317,7 +367,44 @@ export default function Dashboard({ user, onNavigate }) {
           <p className="text-gray-400 text-sm mb-1">平均单次请求 Token 量</p>
           <h3 className="text-2xl font-bold text-white">{avgTokensPerCall}</h3>
         </div>
+
+        {/* 并发监控卡片 */}
+        <div className="bg-dark-800 rounded-xl p-6 border border-dark-700 shadow-lg">
+          <p className="text-gray-400 text-sm mb-1">当前并发请求</p>
+          <h3 className="text-2xl font-bold text-white">{concurrentStats.global_concurrent || 0}</h3>
+          <p className="text-gray-500 text-xs mt-1">实时活跃请求数</p>
+        </div>
       </div>
+
+      {/* 预算使用进度条 */}
+      {budgetUsage.budget_limit > 0 && (
+        <div className="bg-dark-800 rounded-xl p-6 border border-dark-700 shadow-lg mb-6">
+          <div className="flex justify-between items-center mb-2">
+            <p className="text-gray-400 text-sm">预算使用</p>
+            <p className="text-white text-sm font-medium">
+              {formatNumber(budgetUsage.budget_used)} / {formatNumber(budgetUsage.budget_limit)}
+            </p>
+          </div>
+          <Progress
+            value={Math.min((budgetUsage.budget_used / budgetUsage.budget_limit) * 100, 100)}
+            size="lg"
+            borderRadius="full"
+            bg="dark.700"
+            sx={{
+              '& > div': {
+                backgroundColor: budgetUsage.budget_used / budgetUsage.budget_limit > 0.9
+                  ? 'red.400'
+                  : budgetUsage.budget_used / budgetUsage.budget_limit > 0.7
+                    ? 'orange.400'
+                    : 'green.400'
+              }
+            }}
+          />
+          <p className="text-gray-500 text-xs mt-2">
+            已使用 {((budgetUsage.budget_used / budgetUsage.budget_limit) * 100).toFixed(1)}%
+          </p>
+        </div>
+      )}
 
       {/* Chart Section */}
       <div className="bg-dark-800 rounded-xl p-6 border border-dark-700 shadow-lg mb-6">

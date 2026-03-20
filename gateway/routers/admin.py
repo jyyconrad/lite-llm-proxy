@@ -6,14 +6,16 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func, and_, Numeric
 from typing import List, Optional
-from ..models import UserCreate, UserResponse, APIKeyCreate, APIKeyResponse
+from ..models import UserCreate, UserResponse, APIKeyCreate, APIKeyResponse, ModelConfigPydantic, ModelConfigCreate, ModelConfigUpdate
 from ..dependencies import (
     authenticate_user,
     get_db_session,
     incr_rate_limit,
     require_admin,
+    get_concurrent,
 )
-from data import User, APIKey, UsageStat, CompletionLog
+from data import User, APIKey, UsageStat, CompletionLog, ModelConfig
+from data.model_info import ModelEndPoint, ModelInfoList
 
 router = APIRouter()
 ALPHABET = string.ascii_letters + string.digits  # 62 个字符
@@ -231,6 +233,28 @@ async def self_usage(u=Depends(authenticate_user), db=Depends(get_db_session)):
 
 
 # ---- 统计接口 ----
+@router.get("/stats/concurrent")
+async def stats_concurrent(u=Depends(authenticate_user)):
+    """当前并发请求统计"""
+    # 全局并发数
+    global_concurrent = await get_concurrent("global")
+
+    # 按模型分组的并发数
+    # 获取所有模型配置
+    from config_manager import get_all_models
+
+    models = get_all_models()
+    model_concurrent = {}
+    for model in models:
+        model_concurrent[model] = await get_concurrent(model)
+
+    return {
+        "global_concurrent": global_concurrent,
+        "model_concurrent": model_concurrent,
+        "total_concurrent": sum(model_concurrent.values()),
+    }
+
+
 @router.get("/stats/overview")
 async def stats_overview(u=Depends(authenticate_user), db=Depends(get_db_session)):
     """系统概览统计"""
@@ -730,3 +754,194 @@ async def model_trend(
         data.append(data_entry)
 
     return {"period": period, "granularity": granularity, "data": data}
+
+
+# --------------------------------------------------------------------------- #
+# 模型配置管理
+# --------------------------------------------------------------------------- #
+
+def _convert_litellm_params_to_dict(params: any) -> dict:
+    """将 litellm_params 转换为字典"""
+    if isinstance(params, dict):
+        return params
+    elif hasattr(params, "model_dump"):
+        return params.model_dump()
+    elif hasattr(params, "dict"):
+        return params.dict()
+    else:
+        return params
+
+
+@router.post("/models", response_model=ModelConfigPydantic)
+async def create_model_config(
+    mc: ModelConfigCreate,
+    admin=Depends(require_admin),
+    db=Depends(get_db_session),
+):
+    """创建模型配置（仅管理员可用）"""
+    # 检查模型名称是否已存在
+    stmt = select(ModelConfig).where(ModelConfig.model_name == mc.model_name)
+    result = await db.execute(stmt)
+    existing = result.scalars().first()
+
+    if existing:
+        raise HTTPException(status_code=400, detail="Model name already exists")
+
+    # 转换 litellm_params 为字典
+    litellm_params = _convert_litellm_params_to_dict(mc.litellm_params)
+
+    # 创建新配置
+    new_config = ModelConfig(
+        id=str(uuid.uuid4()),
+        model_name=mc.model_name,
+        litellm_params=litellm_params,
+        support_types=mc.support_types,
+        default_rpm=mc.default_rpm,
+        default_tpm=mc.default_tpm,
+        default_max_tokens=mc.default_max_tokens,
+        description=mc.description,
+        is_active=mc.is_active,
+    )
+
+    db.add(new_config)
+    await db.commit()
+    await db.refresh(new_config)
+
+    return new_config.to_pydantic()
+
+
+@router.get("/models", response_model=List[ModelConfigPydantic])
+async def list_model_configs(
+    include_inactive: bool = False,
+    admin=Depends(require_admin),
+    db=Depends(get_db_session),
+):
+    """获取所有模型配置列表（仅管理员可用）"""
+    if include_inactive:
+        stmt = select(ModelConfig).order_by(ModelConfig.created_at.desc())
+    else:
+        stmt = select(ModelConfig).where(
+            ModelConfig.is_active == True
+        ).order_by(ModelConfig.created_at.desc())
+
+    result = await db.execute(stmt)
+    configs = result.scalars().all()
+
+    return [config.to_pydantic() for config in configs]
+
+
+@router.get("/models/{model_name}", response_model=ModelConfigPydantic)
+async def get_model_config_by_name(
+    model_name: str,
+    admin=Depends(require_admin),
+    db=Depends(get_db_session),
+):
+    """获取指定模型配置（仅管理员可用）"""
+    stmt = select(ModelConfig).where(ModelConfig.model_name == model_name)
+    result = await db.execute(stmt)
+    config = result.scalars().first()
+
+    if not config:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    return config.to_pydantic()
+
+
+@router.put("/models/{model_name}", response_model=ModelConfigPydantic)
+async def update_model_config(
+    model_name: str,
+    mc: ModelConfigUpdate,
+    admin=Depends(require_admin),
+    db=Depends(get_db_session),
+):
+    """更新模型配置（仅管理员可用）"""
+    stmt = select(ModelConfig).where(ModelConfig.model_name == model_name)
+    result = await db.execute(stmt)
+    config = result.scalars().first()
+
+    if not config:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    # 更新字段
+    if mc.litellm_params is not None:
+        config.litellm_params = _convert_litellm_params_to_dict(mc.litellm_params)
+    if mc.support_types is not None:
+        config.support_types = mc.support_types
+    if mc.default_rpm is not None:
+        config.default_rpm = mc.default_rpm
+    if mc.default_tpm is not None:
+        config.default_tpm = mc.default_tpm
+    if mc.default_max_tokens is not None:
+        config.default_max_tokens = mc.default_max_tokens
+    if mc.description is not None:
+        config.description = mc.description
+    if mc.is_active is not None:
+        config.is_active = mc.is_active
+
+    await db.commit()
+    await db.refresh(config)
+
+    return config.to_pydantic()
+
+
+@router.delete("/models/{model_name}")
+async def delete_model_config(
+    model_name: str,
+    admin=Depends(require_admin),
+    db=Depends(get_db_session),
+):
+    """删除模型配置（仅管理员可用），软删除（设置为 inactive）"""
+    stmt = select(ModelConfig).where(ModelConfig.model_name == model_name)
+    result = await db.execute(stmt)
+    config = result.scalars().first()
+
+    if not config:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    # 软删除：设置为 inactive
+    config.is_active = False
+    await db.commit()
+
+    return {"message": f"Model {model_name} has been deactivated"}
+
+
+@router.patch("/models/{model_name}/activate", response_model=ModelConfigPydantic)
+async def activate_model_config(
+    model_name: str,
+    admin=Depends(require_admin),
+    db=Depends(get_db_session),
+):
+    """激活模型配置（仅管理员可用）"""
+    stmt = select(ModelConfig).where(ModelConfig.model_name == model_name)
+    result = await db.execute(stmt)
+    config = result.scalars().first()
+
+    if not config:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    config.is_active = True
+    await db.commit()
+    await db.refresh(config)
+
+    return config.to_pydantic()
+
+
+@router.patch("/models/{model_name}/deactivate", response_model=ModelConfigPydantic)
+async def deactivate_model_config(
+    model_name: str,
+    admin=Depends(require_admin),
+    db=Depends(get_db_session),
+):
+    """停用模型配置（仅管理员可用）"""
+    stmt = select(ModelConfig).where(ModelConfig.model_name == model_name)
+    result = await db.execute(stmt)
+    config = result.scalars().first()
+
+    if not config:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    config.is_active = False
+    await db.commit()
+    await db.refresh(config)
+
+    return config.to_pydantic()

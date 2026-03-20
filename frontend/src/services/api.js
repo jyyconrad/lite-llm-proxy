@@ -49,6 +49,7 @@ class API {
   async getStatsOverview() { return this.request('/admin/stats/overview') }
   async getModelUsageStats() { return this.request('/admin/stats/model-usage') }
   async getRecentActivity(limit = 20) { return this.request(`/admin/stats/recent-activity?limit=${limit}`) }
+  async getConcurrentStats() { return this.request('/admin/stats/concurrent') }
   async getUsageTrend(period = '7d', granularity = 'day', model = null, userId = null) {
     const params = new URLSearchParams({ period, granularity })
     if (model) params.set('model', model)
@@ -68,6 +69,11 @@ class API {
     return this.request(`/admin/stats/model-trend?${params.toString()}`)
   }
 
+  // 获取用户预算使用情况
+  async getUserBudgetUsage() {
+    return this.request('/admin/stats/usage')
+  }
+
   // users & keys
   async getUsers(page = 1, per_page = 20) { return this.request(`/users?page=${page}&per_page=${per_page}`) }
   async createUser(data) { return this.request('/admin/users', 'POST', data) }
@@ -85,6 +91,15 @@ class API {
   async enableOwnAPIKey(keyId) { return this.request(`/auth/api-keys/${keyId}/enable`, 'PATCH') }
   async getModels() { return this.request('/models') }
   async getAllModels() { return this.request('/models/all') }
+
+  // 模型配置管理
+  async getModelConfigs() { return this.request('/admin/models') }
+  async getModelConfig(modelName) { return this.request(`/admin/models/${modelName}`) }
+  async createModelConfig(data) { return this.request('/admin/models', 'POST', data) }
+  async updateModelConfig(modelName, data) { return this.request(`/admin/models/${modelName}`, 'PUT', data) }
+  async deleteModelConfig(modelName) { return this.request(`/admin/models/${modelName}`, 'DELETE') }
+  async activateModel(modelName) { return this.request(`/admin/models/${modelName}/activate`, 'PATCH') }
+  async deactivateModel(modelName) { return this.request(`/admin/models/${modelName}/deactivate`, 'PATCH') }
 }
 
 const api = new API()

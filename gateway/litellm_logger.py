@@ -61,6 +61,7 @@ def _write_usage(uid: str, req_model: str, model: str, tokens: int, cost: float)
         tokens: 消耗的 token 数量
         cost: 花费成本
     """
+    sess = None
     try:
         incr_rate_limit_sync(uid, req_model, model, tokens, cost)
         sess = sync_session()
@@ -92,7 +93,8 @@ def _write_usage(uid: str, req_model: str, model: str, tokens: int, cost: float)
     except Exception as e:
         logger.error(f"[usage_stat_error] {e}")
     finally:
-        sess.close()
+        if sess is not None:
+            sess.close()
 
 
 def _write_completion_log(
@@ -127,6 +129,7 @@ def _write_completion_log(
         error_message: 错误消息
         duration: 耗时（毫秒）
     """
+    sess = None
     try:
         sess = sync_session()
 
@@ -164,10 +167,13 @@ def _write_completion_log(
         sess.add(detail_entry)
 
         sess.commit()
-        sess.close()
-
     except Exception as e:
         logger.error(f"[completion_log_error] {e}")
+        if sess is not None:
+            sess.rollback()
+    finally:
+        if sess is not None:
+            sess.close()
 
 
 class LiteLLMCustomLogger(CustomLogger):
@@ -247,18 +253,12 @@ class LiteLLMCustomLogger(CustomLogger):
 
             # 异步写入数据库（不阻塞主流程）
             loop = asyncio.get_event_loop()
-            req_data = {
-                "user_id": user_id,
-                "model": req_model,
-                "messages": messages,
-                "tools": kwargs.get("tools", None),
-            }
             loop.create_task(
                 asyncio.to_thread(
                     _write_completion_log,
                     uid=user_id,
                     model=req_model,
-                    request_data=req_data,
+                    request_data=make_json_safe(kwargs),  # 保存完整的请求参数
                     messages=messages,
                     tools=kwargs.get("tools", None),
                     response_data=None,
@@ -324,7 +324,7 @@ class LiteLLMCustomLogger(CustomLogger):
                     _write_completion_log,
                     uid=user_id,
                     model=model,
-                    request_data=kwargs,
+                    request_data=make_json_safe(kwargs),  # 保存完整的请求参数
                     messages=kwargs.get("messages"),
                     tools=kwargs.get("tools"),
                     response_data=None,

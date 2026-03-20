@@ -65,8 +65,52 @@ class CompletionDetail(Base):
     tools = Column(JSON, nullable=True)  # 存储工具信息
     full_response = Column(JSON, nullable=True)  # 存储完整的模型响应
     created_at = Column(DateTime, server_default=func.now())
-    
+
     # 关联到CompletionLog
     completion_log = relationship("CompletionLog", backref="details")
+
+
+class ModelConfig(Base):
+    """模型配置表，支持数据库化管理模型配置"""
+    __tablename__ = "model_configs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    model_name = Column(String(100), unique=True, nullable=False, index=True)
+    litellm_params = Column(JSON, nullable=False)  # 存储 litellm 参数
+    support_types = Column(JSON, default=["text"])  # 支持的类型 ["text", "image", "embedding"]
+    default_rpm = Column(Integer, default=10)  # 默认 RPM 限制
+    default_tpm = Column(Integer, default=100000)  # 默认 TPM 限制
+    default_max_tokens = Column(Integer, default=32768)  # 默认最大 token 数
+    description = Column(String(500), default="大语言模型")
+    is_active = Column(Boolean, default=True)  # 是否启用
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    def to_pydantic(self) -> "ModelConfigPydantic":
+        """转换为 Pydantic 模型用于 API 响应"""
+        from data.model_info import ModelEndPoint, ModelInfoList
+        from gateway.models import ModelConfigPydantic
+
+        litellm_params = self.litellm_params
+        params = None
+        if isinstance(litellm_params, dict):
+            if "endpoints" in litellm_params:
+                params = ModelInfoList(**litellm_params)
+            else:
+                params = ModelEndPoint(**litellm_params)
+
+        return ModelConfigPydantic(
+            id=self.id,
+            model_name=self.model_name,
+            litellm_params=params,
+            support_types=self.support_types or ["text"],
+            default_rpm=self.default_rpm,
+            default_tpm=self.default_tpm,
+            default_max_tokens=self.default_max_tokens,
+            description=self.description,
+            is_active=self.is_active,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+        )
 
 

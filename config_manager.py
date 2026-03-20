@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 配置管理器，用于加载和缓存配置文件
+
+支持双读机制：
+1. 优先从数据库读取模型配置
+2. 如果数据库中没有配置，回退到 YAML 文件
 """
 
 from typing import Dict, Any, Optional, List, Union, Literal
@@ -199,17 +203,17 @@ class ConfigManager:
             raise
 
     def get_model_config(self, model_name: str) -> Optional[ModelConfig]:
-        """获取指定模型的配置"""
+        """获取指定模型的配置（仅从 YAML）"""
         with self.cache_lock:
             return self.models_config.get(model_name)
 
     def get_all_models(self) -> list:
-        """获取所有模型名称"""
+        """获取所有模型名称（仅从 YAML）"""
         with self.cache_lock:
             return list(self.models_config.keys())
 
     def get_all_model_configs(self) -> Dict[str, ModelConfig]:
-        """获取所有模型配置"""
+        """获取所有模型配置（仅从 YAML）"""
         with self.cache_lock:
             return self.models_config
 
@@ -229,24 +233,175 @@ class ConfigManager:
         except Exception as e:
             print(f"Error checking config file modification: {str(e)}")
 
+    def yaml_to_model_config(self, db_model_config: "DBModelConfig") -> Optional[ModelConfig]:
+        """将数据库模型配置转换为 Pydantic ModelConfig"""
+        from data.tables import ModelConfig as DBModelConfig
+
+        litellm_params = db_model_config.litellm_params
+        params = None
+
+        if isinstance(litellm_params, dict):
+            if "endpoints" in litellm_params:
+                params = ModelInfoList(**litellm_params)
+            else:
+                params = ModelEndPoint(**litellm_params)
+
+        return ModelConfig(
+            model_name=db_model_config.model_name,
+            litellm_params=params,
+            support_types=db_model_config.support_types or ["text"],
+            default_rpm=db_model_config.default_rpm,
+            default_tpm=db_model_config.default_tpm,
+            default_max_tokens=db_model_config.default_max_tokens,
+            description=db_model_config.description,
+        )
+
 
 # 全局配置管理器实例
 config_manager = ConfigManager()
 
 
 def get_model_config(model_name: str) -> Optional[ModelConfig]:
-    """获取模型配置的便捷函数"""
+    """获取模型配置的便捷函数（仅从 YAML）"""
     config_manager.refresh_if_needed()
     return config_manager.get_model_config(model_name)
 
 
 def get_all_model_configs() -> Dict[str, ModelConfig]:
-    """获取所有模型配置的便捷函数"""
+    """获取所有模型配置的便捷函数（仅从 YAML）"""
     config_manager.refresh_if_needed()
     return config_manager.get_all_model_configs()
 
 
 def get_all_models() -> list:
-    """获取所有模型的便捷函数"""
+    """获取所有模型的便捷函数（仅从 YAML）"""
     config_manager.refresh_if_needed()
     return config_manager.get_all_models()
+
+
+# --------------------------------------------------------------------------- #
+# 异步配置获取函数（支持数据库优先）
+# --------------------------------------------------------------------------- #
+async def async_get_model_config(
+    model_name: str, db_session
+) -> Optional[ModelConfig]:
+    """异步获取模型配置，优先从数据库读取，fallback 到 YAML
+
+    Args:
+        model_name: 模型名称
+        db_session: 数据库会话
+
+    Returns:
+        ModelConfig Pydantic 模型，如果都不存在则返回 None
+    """
+    from sqlalchemy import select
+    from data.tables import ModelConfig as DBModelConfig
+
+    # 优先从数据库获取
+    try:
+        stmt = select(DBModelConfig).where(
+            DBModelConfig.model_name == model_name,
+            DBModelConfig.is_active == True
+        )
+        result = await db_session.execute(stmt)
+        db_config = result.scalars().first()
+
+        if db_config is not None:
+            # 数据库中有配置，转换为 Pydantic 模型
+            litellm_params = db_config.litellm_params
+            params = None
+
+            if isinstance(litellm_params, dict):
+                if "endpoints" in litellm_params:
+                    params = ModelInfoList(**litellm_params)
+                else:
+                    params = ModelEndPoint(**litellm_params)
+
+            return ModelConfig(
+                model_name=db_config.model_name,
+                litellm_params=params,
+                support_types=db_config.support_types or ["text"],
+                default_rpm=db_config.default_rpm,
+                default_tpm=db_config.default_tpm,
+                default_max_tokens=db_config.default_max_tokens,
+                description=db_config.description,
+            )
+    except Exception as e:
+        # 数据库查询失败，记录警告并继续回退到 YAML
+        warnings.warn(f"Database query failed, falling back to YAML: {e}")
+
+    # 回退到 YAML 配置
+    config_manager.refresh_if_needed()
+    return config_manager.get_model_config(model_name)
+
+
+async def async_get_all_models_with_db(
+    db_session, include_inactive: bool = False
+) -> List[str]:
+    """获取所有模型名称，优先从数据库，合并 YAML
+
+    Args:
+        db_session: 数据库会话
+        include_inactive: 是否包含已禁用的模型
+
+    Returns:
+        所有模型名称列表
+    """
+    from sqlalchemy import select
+    from data.tables import ModelConfig as DBModelConfig
+
+    yaml_models = set(config_manager.get_all_models())
+    db_models = set()
+
+    try:
+        # 从数据库获取所有模型
+        if include_inactive:
+            stmt = select(DBModelConfig.model_name)
+        else:
+            stmt = select(DBModelConfig.model_name).where(
+                DBModelConfig.is_active == True
+            )
+
+        result = await db_session.execute(stmt)
+        db_models = {row[0] for row in result.all()}
+    except Exception as e:
+        warnings.warn(f"Database query for models failed: {e}")
+
+    # 合并：数据库 + YAML
+    all_models = list(db_models | yaml_models)
+    return all_models
+
+
+async def async_get_all_model_configs_with_db(
+    db_session, include_inactive: bool = False
+) -> Dict[str, ModelConfig]:
+    """获取所有模型配置，优先从数据库，合并 YAML
+
+    Args:
+        db_session: 数据库会话
+        include_inactive: 是否包含已禁用的模型
+
+    Returns:
+        模型名称到配置的字典
+    """
+    from sqlalchemy import select
+    from data.tables import ModelConfig as DBModelConfig
+
+    # 获取 YAML 配置
+    yaml_configs = config_manager.get_all_model_configs()
+
+    # 从数据库获取配置
+    db_configs = {}
+    try:
+        if include_inactive:
+            stmt = select(DBModelConfig)
+        else:
+            stmt = select(DBModelConfig).where(DBModelConfig.is_active == True)
+
+        result = await db_session.execute(stmt)
+        for db_config in result.scalars().all():
+            yaml_configs[db_config.model_name] = config_manager.yaml_to_model_config(db_config)
+    except Exception as e:
+        warnings.warn(f"Database query for model configs failed: {e}")
+
+    return yaml_configs

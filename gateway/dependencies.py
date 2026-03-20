@@ -43,6 +43,36 @@ async def get_redis() -> Redis:
     return _redis_client
 
 
+async def incr_concurrent(model_name: str = "global") -> int:
+    """增加并发计数，返回当前并发数"""
+    r = await get_redis()
+    key = f"concurrent:{model_name}"
+    count = await r.incr(key)
+    # 设置 5 分钟超时，防止 zombie 任务
+    await r.expire(key, 300)
+    return count
+
+
+async def decr_concurrent(model_name: str = "global") -> int:
+    """减少并发计数，返回当前并发数"""
+    r = await get_redis()
+    key = f"concurrent:{model_name}"
+    count = await r.decr(key)
+    if count < 0:
+        # 不允许负数
+        await r.set(key, 0)
+        return 0
+    return count
+
+
+async def get_concurrent(model_name: str = "global") -> int:
+    """获取当前并发数"""
+    r = await get_redis()
+    key = f"concurrent:{model_name}"
+    count = await r.get(key)
+    return int(count or 0)
+
+
 def parse_redis(url: str):
     # redis://[:password]@host:port
     # 移除redis://前缀

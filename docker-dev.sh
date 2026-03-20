@@ -20,7 +20,7 @@ echo -e "${YELLOW}使用镜像TAG: ${TAG}${NC}"
 # 2. 复制环境配置文件
 if [ -f ".env-local" ]; then
     echo -e "${YELLOW}复制.env-local到.env...${NC}"
-    cp .env-local .env
+    cp .env-docker .env
 
     # 添加TAG信息到.env文件
     echo -e "${YELLOW}添加TAG信息到.env文件...${NC}"
