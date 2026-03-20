@@ -160,6 +160,7 @@ logs/
 # Environment files
 .env.local
 .env.*.local
+.env-prod
 
 # LiteLLM
 litellm-config.yaml
