@@ -1,6 +1,6 @@
 import uuid
 from fastapi import APIRouter, Depends, HTTPException
-from datetime import datetime
+from datetime import datetime, timezone
 import yaml, os
 from sqlalchemy import select, func
 import asyncio
@@ -26,7 +26,7 @@ async def health():
     """基础健康检查"""
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "version": "1.0.0",
     }
 
@@ -36,7 +36,7 @@ async def detailed_health():
     """详细健康检查 - 检查各组件状态"""
     health_status = {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "components": {},
     }
 

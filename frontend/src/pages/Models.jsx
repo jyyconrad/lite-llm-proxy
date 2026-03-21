@@ -23,8 +23,14 @@ export default function Models({ user, onNavigate }) {
   })
   const [formErrors, setFormErrors] = useState({})
 
+  // 配置同步相关状态
+  const [syncStatus, setSyncStatus] = useState(null)
+  const [syncLoading, setSyncLoading] = useState(false)
+  const [showSyncModal, setShowSyncModal] = useState(false)
+
   useEffect(() => {
     loadModels()
+    loadSyncStatus()
   }, [])
 
   async function loadModels() {
@@ -37,6 +43,15 @@ export default function Models({ user, onNavigate }) {
       setModels([])
     }
     setLoading(false)
+  }
+
+  async function loadSyncStatus() {
+    try {
+      const status = await api.getConfigSyncStatus()
+      setSyncStatus(status)
+    } catch (e) {
+      console.error('Failed to load sync status:', e)
+    }
   }
 
   // 打开新增表单
@@ -199,6 +214,54 @@ export default function Models({ user, onNavigate }) {
     return colors[provider] || colors.custom
   }
 
+  // 手动触发同步
+  async function handleSync(e) {
+    if (e) e.stopPropagation()
+
+    const modelCount = syncStatus?.model_count || 0
+    if (!confirm(`确定要从 YAML 配置文件同步模型配置到数据库吗？
+
+当前数据库模型数：${modelCount}
+同步规则:
+• 数据库中已存在的模型将保持不变
+• 只会添加 YAML 中新增的模型
+• 不会删除或修改任何现有配置`)) {
+      return
+    }
+
+    setSyncLoading(true)
+    try {
+      const result = await api.triggerConfigSync()
+      alert(`同步完成：${result.result}`)
+      // 并行加载数据
+      await Promise.all([loadSyncStatus(), loadModels()])
+    } catch (err) {
+      console.error('同步失败:', err)
+      alert(err.message || '同步失败，请重试')
+    } finally {
+      setSyncLoading(false)
+    }
+  }
+
+  function openSyncModal() {
+    setShowSyncModal(true)
+  }
+
+  const getStatusColor = () => {
+    if (!syncStatus) return 'gray'
+    if (syncStatus.is_synced) return 'green'
+    if (syncStatus.yaml_changed) return 'yellow'
+    return 'gray'
+  }
+
+  const getStatusText = () => {
+    if (!syncStatus) return '未知'
+    if (syncStatus.is_synced) return '已同步'
+    if (syncStatus.yaml_changed) return 'YAML 有更新'
+    if (syncStatus.db_changed) return '数据库已更新'
+    return '未知'
+  }
+
   return (
     <div className="container mx-auto px-4 py-6">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
@@ -206,7 +269,30 @@ export default function Models({ user, onNavigate }) {
           <h1 className="text-2xl font-bold text-white">模型管理</h1>
           <p className="text-gray-400">查看和管理所有可用模型</p>
         </div>
-        <div className="flex gap-3">
+        <div className="flex gap-3 flex-wrap">
+          {/* 同步状态指示器 */}
+          {syncStatus && (
+            <div className="flex items-center gap-2 px-3 py-2 bg-dark-800 rounded-lg border border-dark-700">
+              <div className={`w-2 h-2 rounded-full ${
+                getStatusColor() === 'green' ? 'bg-green-500' :
+                getStatusColor() === 'yellow' ? 'bg-yellow-500' :
+                'bg-gray-500'
+              }`}></div>
+              <span className="text-gray-300 text-sm">{getStatusText()}</span>
+              {syncStatus.last_sync_time && (
+                <span className="text-gray-500 text-xs">
+                  · 最后同步：{new Date(syncStatus.last_sync_time).toLocaleString('zh-CN')}
+                </span>
+              )}
+            </div>
+          )}
+          <button
+            onClick={openSyncModal}
+            disabled={syncLoading}
+            className="px-4 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 rounded-lg transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {syncLoading ? '同步中...' : '同步配置'}
+          </button>
           <button
             onClick={openCreate}
             className="px-4 py-2 bg-primary-500 hover:bg-primary-600 text-dark-950 rounded-lg transition-colors font-medium"
@@ -645,6 +731,122 @@ export default function Models({ user, onNavigate }) {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* 同步配置弹窗 */}
+      {showSyncModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={() => setShowSyncModal(false)}>
+          <div className="bg-dark-800 rounded-xl p-6 border border-dark-700 shadow-lg w-full max-w-2xl" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-6">
+              <div>
+                <h3 className="text-xl font-bold text-white">配置同步</h3>
+                <p className="text-gray-400 text-sm">YAML 配置文件 ↔ 数据库</p>
+              </div>
+              <button
+                onClick={() => setShowSyncModal(false)}
+                className="text-gray-400 hover:text-white text-xl"
+              >
+                &times;
+              </button>
+            </div>
+
+            {/* 同步状态信息 */}
+            {syncStatus && (
+              <div className="space-y-4 mb-6">
+                <div className="bg-dark-700 rounded-lg p-4">
+                  <div className="flex justify-between items-center mb-3">
+                    <span className="text-gray-300">同步状态</span>
+                    <span className={`px-3 py-1 rounded-full text-sm font-medium ${
+                      syncStatus.is_synced
+                        ? 'bg-green-500/20 text-green-400'
+                        : syncStatus.yaml_changed
+                        ? 'bg-yellow-500/20 text-yellow-400'
+                        : 'bg-gray-500/20 text-gray-400'
+                    }`}>
+                      {getStatusText()}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="bg-dark-800 rounded-lg p-3">
+                      <p className="text-gray-500 text-xs mb-1">YAML 配置</p>
+                      <p className="text-white font-mono text-sm truncate" title={syncStatus.yaml_hash_short}>
+                        {syncStatus.yaml_hash_short || 'N/A'}
+                      </p>
+                    </div>
+                    <div className="bg-dark-800 rounded-lg p-3">
+                      <p className="text-gray-500 text-xs mb-1">数据库配置</p>
+                      <p className="text-white font-mono text-sm truncate" title={syncStatus.db_hash_short}>
+                        {syncStatus.db_hash_short || 'N/A'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 flex justify-between text-sm">
+                    <span className="text-gray-400">
+                      最后同步时间：{syncStatus.last_sync_time
+                        ? new Date(syncStatus.last_sync_time).toLocaleString('zh-CN')
+                        : '从未同步'
+                      }
+                    </span>
+                    <span className="text-gray-400">
+                      同步来源：{syncStatus.last_sync_source || '无'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 同步说明 */}
+                <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4">
+                  <h4 className="text-blue-400 font-medium mb-2">同步规则</h4>
+                  <ul className="text-gray-300 text-sm space-y-1">
+                    <li>• 数据库优先：数据库中已存在的模型将保持不变</li>
+                    <li>• 增量同步：只会添加 YAML 中新增的模型</li>
+                    <li>• 安全保护：不会覆盖数据库中的配置</li>
+                  </ul>
+                </div>
+
+                {/* 模型统计 */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="bg-dark-700 rounded-lg p-3 text-center">
+                    <p className="text-gray-500 text-xs mb-1">数据库模型数</p>
+                    <p className="text-2xl font-bold text-white">{syncStatus.model_count}</p>
+                  </div>
+                  <div className="bg-dark-700 rounded-lg p-3 text-center">
+                    <p className="text-gray-500 text-xs mb-1">YAML 有更新</p>
+                    <p className={`text-2xl font-bold ${
+                      syncStatus.yaml_changed ? 'text-yellow-400' : 'text-green-400'
+                    }`}>
+                      {syncStatus.yaml_changed ? '是' : '否'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 操作按钮 */}
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setShowSyncModal(false)}
+                className="px-4 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 rounded-lg transition-colors"
+              >
+                关闭
+              </button>
+              <button
+                type="button"
+                onClick={handleSync}
+                disabled={syncLoading || (syncStatus && syncStatus.is_synced)}
+                className={`px-4 py-2 rounded-lg transition-colors font-medium ${
+                  syncLoading || (syncStatus && syncStatus.is_synced)
+                    ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                    : 'bg-primary-500 hover:bg-primary-600 text-dark-950'
+                }`}
+              >
+                {syncLoading ? '同步中...' : '立即同步'}
+              </button>
+            </div>
           </div>
         </div>
       )}

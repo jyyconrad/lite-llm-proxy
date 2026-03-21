@@ -114,3 +114,19 @@ class ModelConfig(Base):
         )
 
 
+class ConfigCheckpoint(Base):
+    """配置同步检查点表，记录 YAML 与数据库配置的同步状态"""
+    __tablename__ = "config_checkpoints"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    config_type = Column(String(50), nullable=False, unique=True, default="litellm_config")  # 配置类型
+    yaml_hash = Column(String(64), nullable=False)  # YAML 文件内容 SHA256 哈希
+    db_hash = Column(String(64))  # 数据库配置 SHA256 哈希
+    last_sync_source = Column(String(20))  # 最后同步来源："yaml" | "database" | "none"
+    last_sync_time = Column(DateTime)  # 最后同步时间
+    yaml_updated_at = Column(DateTime)  # YAML 文件修改时间戳
+    db_updated_at = Column(DateTime)  # 数据库最后更新时间戳
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+

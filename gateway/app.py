@@ -193,11 +193,16 @@ def create_app() -> FastAPI:
             logger.info("Database initialized on startup")
 
             initialize_local_models()
-        except Exception:
-            logger.exception("Database initialization failed on startup")
-            raise
-        except Exception:
-            logger.exception("Database initialization failed on startup")
+
+            # 执行配置同步
+            from gateway.services.config_sync_service import get_config_sync_service
+            from data.db import AsyncSessionLocal
+            async with AsyncSessionLocal() as session:
+                sync_service = get_config_sync_service()
+                result = await sync_service.sync_on_startup(session)
+                logger.info(f"配置同步完成：{result}")
+        except Exception as e:
+            logger.exception(f"启动失败：{e}")
             raise
 
     return app

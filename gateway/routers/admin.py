@@ -1,7 +1,7 @@
 import secrets
 import string
 import uuid, asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func, and_, Numeric
@@ -392,7 +392,7 @@ async def recent_activity(
                 "cost": (row.total_cost or 0) if row.total_cost else 0.0,
                 "timestamp": row.last_used.isoformat()
                 if row.last_used
-                else datetime.utcnow().isoformat(),
+                else datetime.now(timezone.utc).isoformat(),
                 "success": True,  # 需要错误数据，暂时设为True
                 "response_time": 1250,  # 需要响应时间数据，暂时使用默认值
             }
@@ -945,3 +945,33 @@ async def deactivate_model_config(
     await db.refresh(config)
 
     return config.to_pydantic()
+
+
+# --------------------------------------------------------------------------- #
+# 配置同步管理
+# --------------------------------------------------------------------------- #
+
+@router.get("/config/sync-status")
+async def get_sync_status(
+    admin=Depends(require_admin),
+    db=Depends(get_db_session),
+):
+    """获取配置同步状态（仅管理员可用）"""
+    from gateway.services.config_sync_service import get_config_sync_service
+
+    sync_service = get_config_sync_service()
+    status = await sync_service.get_sync_status(db)
+    return status
+
+
+@router.post("/config/sync")
+async def trigger_sync(
+    admin=Depends(require_admin),
+    db=Depends(get_db_session),
+):
+    """手动触发配置同步（仅管理员可用）"""
+    from gateway.services.config_sync_service import get_config_sync_service
+
+    sync_service = get_config_sync_service()
+    result = await sync_service.sync_on_startup(db)
+    return {"message": "同步完成", "result": result}

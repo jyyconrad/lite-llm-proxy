@@ -100,6 +100,10 @@ class API {
   async deleteModelConfig(modelName) { return this.request(`/admin/models/${modelName}`, 'DELETE') }
   async activateModel(modelName) { return this.request(`/admin/models/${modelName}/activate`, 'PATCH') }
   async deactivateModel(modelName) { return this.request(`/admin/models/${modelName}/deactivate`, 'PATCH') }
+
+  // 配置同步
+  async getConfigSyncStatus() { return this.request('/admin/config/sync-status') }
+  async triggerConfigSync() { return this.request('/admin/config/sync', 'POST') }
 }
 
 const api = new API()
