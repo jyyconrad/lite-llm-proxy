@@ -30,6 +30,7 @@ from config_manager import async_get_model_config, async_get_all_models_with_db
 from data import CompletionDetail, CompletionLog, UsageStat, sync_session, get_db_session
 
 logger = get_logger()
+settings = get_settings()
 
 
 def _parse_arguments_if_json(arguments: Any) -> Any:
@@ -42,9 +43,44 @@ def _parse_arguments_if_json(arguments: Any) -> Any:
         return arguments
 
 
+def _safe_to_python(value: Any) -> Any:
+    """将 Pydantic/BaseModel 等对象转换为可 JSON 序列化的 Python 结构。"""
+    if isinstance(value, dict):
+        return {k: _safe_to_python(v) for k, v in value.items()}
+
+    if isinstance(value, (list, tuple, set)):
+        return [_safe_to_python(item) for item in value]
+
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump()
+        except TypeError as exc:
+            logger.debug("model_dump 失败，使用回退序列化: %s - %s", type(value), exc)
+            if hasattr(value, "model_fields"):
+                dumped = {
+                    field_name: getattr(value, field_name, None)
+                    for field_name in value.model_fields
+                }
+            else:
+                raw_attrs = getattr(value, "__dict__", {})
+                if isinstance(raw_attrs, dict):
+                    dumped = {
+                        attr: raw_attrs[attr]
+                        for attr in raw_attrs
+                        if not attr.startswith("__")
+                    }
+                else:
+                    return value
+        return _safe_to_python(dumped)
+
+    return value
+
+
 def _process_function_calls(resp: Any) -> Any:
-    if isinstance(resp, dict):
-        choices = resp.get("choices", [])
+    data = _safe_to_python(resp)
+
+    if isinstance(data, dict):
+        choices = data.get("choices", [])
         for choice in choices:
             message = choice.get("message", {})
 
@@ -62,11 +98,8 @@ def _process_function_calls(resp: Any) -> Any:
                         args = func.get("arguments")
                         if args is not None:
                             func["arguments"] = _parse_arguments_if_json(args)
-    elif hasattr(resp, "model_dump"):
-        data = resp.model_dump()
-        return _process_function_calls(data)
 
-    return resp
+    return data
 
 
 # ==================== 数据模型 ====================
@@ -162,23 +195,28 @@ async def _call_llm_with_retry(params: dict, uid: str, req_model: str, is_stream
     model_name = params.get("model", "unknown")
     cb = get_circuit_breaker(model_name)
 
+    # 先检查熔断器状态，如果打开则直接拒绝
+    if not cb.can_execute():
+        cb_state = cb.state
+        logger.warning(
+            f"Circuit breaker OPEN for model '{model_name}' (state={cb_state.name}), "
+            f"failures={cb._failure_count}, last_failure={cb._last_failure_time:.0f}"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service temporarily unavailable (circuit breaker open for model '{model_name}')",
+        )
+
     last_error = None
 
-    for attempt in range(retry_config.max_retries + 1):
-        # 检查熔断器状态
-        if not cb.can_execute():
-            logger.warning(
-                f"Circuit breaker open for {model_name}, attempt {attempt + 1}"
-            )
-            if attempt < retry_config.max_retries:
-                await asyncio.sleep(calculate_retry_delay(attempt, retry_config))
-                continue
-            raise HTTPException(
-                status_code=503,
-                detail="Service temporarily unavailable (circuit breaker open)",
-            )
+    # 添加请求超时配置
+    params["request_timeout"] = settings.request_timeout
 
+    for attempt in range(retry_config.max_retries + 1):
         try:
+            logger.info(
+                f"Calling LLM for model '{model_name}', attempt {attempt + 1}/{retry_config.max_retries + 1}, timeout={settings.request_timeout}s"
+            )
             if is_stream:
                 return await litellm.acompletion(
                     **params, max_retries=0, user_id=uid, req_model=req_model
@@ -191,15 +229,20 @@ async def _call_llm_with_retry(params: dict, uid: str, req_model: str, is_stream
             cb.record_failure()
             last_error = e
             logger.warning(
-                f"LLM call failed (attempt {attempt + 1}/{retry_config.max_retries + 1}): {e}"
+                f"LLM call failed for model '{model_name}' (attempt {attempt + 1}/{retry_config.max_retries + 1}): {e}"
             )
 
             if attempt < retry_config.max_retries:
                 delay = calculate_retry_delay(attempt, retry_config)
+                logger.info(f"Retrying in {delay:.2f}s...")
                 await asyncio.sleep(delay)
             continue
 
     cb.record_failure()
+    logger.error(
+        f"All retries exhausted for model '{model_name}', "
+        f"circuit breaker state: failures={cb._failure_count}, state={cb.state.name}"
+    )
     raise last_error
 
 

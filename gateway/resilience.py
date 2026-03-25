@@ -60,7 +60,7 @@ class CircuitBreaker:
                 self._state = CircuitState.CLOSED
                 self._failure_count = 0
                 self._success_count = 0
-                logger.info(f"CircuitBreaker '{self.name}' transitioned to CLOSED")
+                logger.info(f"CircuitBreaker '{self.name}' transitioned to CLOSED (recovered)")
         elif self._state == CircuitState.CLOSED:
             self._failure_count = 0
 
@@ -72,13 +72,17 @@ class CircuitBreaker:
         if self._state == CircuitState.HALF_OPEN:
             self._state = CircuitState.OPEN
             logger.warning(
-                f"CircuitBreaker '{self.name}' transitioned to OPEN (half_open failure)"
+                f"CircuitBreaker '{self.name}' transitioned to OPEN (half_open failure, failures={self._failure_count})"
             )
         elif self._state == CircuitState.CLOSED:
             if self._failure_count >= self.config.failure_threshold:
                 self._state = CircuitState.OPEN
                 logger.warning(
-                    f"CircuitBreaker '{self.name}' transitioned to OPEN (failure threshold reached)"
+                    f"CircuitBreaker '{self.name}' transitioned to OPEN (failure threshold reached, failures={self._failure_count})"
+                )
+            else:
+                logger.info(
+                    f"CircuitBreaker '{self.name}' recorded failure (failures={self._failure_count}/{self.config.failure_threshold})"
                 )
 
     def can_execute(self) -> bool:

@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     metrics_port: int = Field(9090, env="METRICS_PORT")
     health_check_interval: int = Field(30, env="HEALTH_CHECK_INTERVAL")
 
+    # LLM Request Timeout Configuration (in seconds)
+    # Default: 300 seconds (5 minutes)
+    request_timeout: int = Field(300, env="REQUEST_TIMEOUT")
+
     model_config = ConfigDict(env_file=".env", extra="ignore")
 
 @lru_cache
