@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import api from '../services/api'
+import SingleNodeForm, { createDefaultNode, PROVIDER_CONFIG } from '../components/models/SingleNodeForm'
+import MultiNodeForm from '../components/models/MultiNodeForm'
 
 export default function Models({ user, onNavigate }) {
   const [models, setModels] = useState([])
@@ -22,6 +24,12 @@ export default function Models({ user, onNavigate }) {
     is_active: true
   })
   const [formErrors, setFormErrors] = useState({})
+
+  // 终端节点表单相关状态
+  const [endpointFormMode, setEndpointFormMode] = useState('single') // 'single' | 'multi'
+  const [singleNodeData, setSingleNodeData] = useState(createDefaultNode())
+  const [multiNodeData, setMultiNodeData] = useState({ endpoints: [] })
+  const [nodeFormErrors, setNodeFormErrors] = useState({})
 
   // 配置同步相关状态
   const [syncStatus, setSyncStatus] = useState(null)
@@ -67,7 +75,11 @@ export default function Models({ user, onNavigate }) {
       litellm_params: {},
       is_active: true
     })
+    setEndpointFormMode('single')
+    setSingleNodeData(createDefaultNode())
+    setMultiNodeData({ endpoints: [] })
     setFormErrors({})
+    setNodeFormErrors({})
     setShowModal(true)
   }
 
@@ -85,7 +97,37 @@ export default function Models({ user, onNavigate }) {
       litellm_params: model.litellm_params || {},
       is_active: model.is_active !== false
     })
+
+    // 解析现有的 litellm_params 到节点表单
+    const litellmParams = model.litellm_params || {}
+    if (litellmParams.endpoints && Array.isArray(litellmParams.endpoints)) {
+      // 多节点模式
+      setEndpointFormMode('multi')
+      setMultiNodeData({ endpoints: litellmParams.endpoints })
+      setSingleNodeData(createDefaultNode())
+    } else if (Object.keys(litellmParams).length > 0) {
+      // 单节点模式
+      setEndpointFormMode('single')
+      setSingleNodeData({
+        provider: litellmParams.provider || 'openai',
+        model: litellmParams.model || '',
+        api_key: litellmParams.api_key || '',
+        base_url: litellmParams.base_url || PROVIDER_CONFIG.openai.defaultBaseUrl,
+        max_tokens: litellmParams.max_tokens || 4096,
+        rpm: litellmParams.rpm || 60,
+        tpm: litellmParams.tpm || 100000,
+        weight: litellmParams.weight || 1
+      })
+      setMultiNodeData({ endpoints: [] })
+    } else {
+      // 默认单节点模式
+      setEndpointFormMode('single')
+      setSingleNodeData(createDefaultNode())
+      setMultiNodeData({ endpoints: [] })
+    }
+
     setFormErrors({})
+    setNodeFormErrors({})
     setShowModal(true)
   }
 
@@ -104,17 +146,76 @@ export default function Models({ user, onNavigate }) {
     return Object.keys(errors).length === 0
   }
 
+  // 节点表单验证
+  function validateNodeForm() {
+    const errors = {}
+
+    if (endpointFormMode === 'single') {
+      if (!singleNodeData.model?.trim()) errors.model = '模型名称不能为空'
+      if (!singleNodeData.api_key?.trim()) errors.api_key = 'API Key 不能为空'
+      if (!singleNodeData.base_url?.trim()) errors.base_url = 'Base URL 不能为空'
+      if (singleNodeData.max_tokens && singleNodeData.max_tokens <= 0) errors.max_tokens = 'Max Tokens 必须大于 0'
+      if (singleNodeData.rpm && singleNodeData.rpm <= 0) errors.rpm = 'RPM 必须大于 0'
+      if (singleNodeData.tpm && singleNodeData.tpm <= 0) errors.tpm = 'TPM 必须大于 0'
+      if (singleNodeData.weight && singleNodeData.weight < 0) errors.weight = 'Weight 必须大于等于 0'
+    } else {
+      // 多节点模式
+      if (!multiNodeData.endpoints || multiNodeData.endpoints.length === 0) {
+        errors.endpoints = '至少添加一个节点'
+      } else {
+        const endpointErrors = []
+        multiNodeData.endpoints.forEach((ep, index) => {
+          const epErrors = {}
+          if (!ep.model?.trim()) epErrors.model = '模型名称不能为空'
+          if (!ep.api_key?.trim()) epErrors.api_key = 'API Key 不能为空'
+          if (!ep.base_url?.trim()) epErrors.base_url = 'Base URL 不能为空'
+          if (Object.keys(epErrors).length > 0) {
+            endpointErrors[index] = epErrors
+          }
+        })
+        if (endpointErrors.length > 0) {
+          errors.endpoints = endpointErrors
+        }
+      }
+    }
+
+    setNodeFormErrors(errors)
+    return Object.keys(errors).length === 0
+  }
+
   // 提交表单
   async function submitForm(e) {
     e.preventDefault()
     if (!validateForm()) return
+    if (!validateNodeForm()) return
 
     try {
+      // 构建 litellm_params
+      let litellmParams
+      if (endpointFormMode === 'multi') {
+        litellmParams = {
+          endpoints: multiNodeData.endpoints.map(ep => ({
+            ...ep,
+            provider: ep.provider || 'openai'
+          }))
+        }
+      } else {
+        // 单节点模式 - 确保所有必需字段都存在
+        litellmParams = {
+          model: singleNodeData.model || '',
+          api_key: singleNodeData.api_key || '',
+          base_url: singleNodeData.base_url || '',
+          provider: singleNodeData.provider || 'openai',
+          max_tokens: singleNodeData.max_tokens || 4096,
+          rpm: singleNodeData.rpm || 60,
+          tpm: singleNodeData.tpm || 100000,
+          weight: singleNodeData.weight !== undefined ? singleNodeData.weight : 1
+        }
+      }
+
       const submitData = {
         ...form,
-        litellm_params: typeof form.litellm_params === 'string'
-          ? JSON.parse(form.litellm_params)
-          : form.litellm_params
+        litellm_params: litellmParams
       }
 
       if (editingModel) {
@@ -183,6 +284,34 @@ export default function Models({ user, onNavigate }) {
       } catch (e) {
         // 不立即显示错误，等提交时再验证
       }
+    }
+  }
+
+  // 从 JSON 同步到节点表单
+  function syncJsonToNodeForm() {
+    try {
+      const litellmParams = typeof form.litellm_params === 'string'
+        ? JSON.parse(form.litellm_params)
+        : form.litellm_params
+
+      if (litellmParams?.endpoints && Array.isArray(litellmParams.endpoints)) {
+        setEndpointFormMode('multi')
+        setMultiNodeData({ endpoints: litellmParams.endpoints })
+      } else if (litellmParams && Object.keys(litellmParams).length > 0) {
+        setEndpointFormMode('single')
+        setSingleNodeData({
+          provider: litellmParams.provider || 'openai',
+          model: litellmParams.model || '',
+          api_key: litellmParams.api_key || '',
+          base_url: litellmParams.base_url || PROVIDER_CONFIG.openai.defaultBaseUrl,
+          max_tokens: litellmParams.max_tokens || 4096,
+          rpm: litellmParams.rpm || 60,
+          tpm: litellmParams.tpm || 100000,
+          weight: litellmParams.weight || 1
+        })
+      }
+    } catch (e) {
+      console.error('Failed to parse JSON:', e)
     }
   }
 
@@ -673,24 +802,89 @@ export default function Models({ user, onNavigate }) {
                 </div>
               </div>
 
-              {/* LiteLLM 参数 JSON */}
+              {/* LiteLLM 参数配置 - 使用表单组件 */}
+              <div className="border border-dark-600 rounded-lg overflow-hidden">
+                {/* 模式切换标签 */}
+                <div className="flex border-b border-dark-600">
+                  <button
+                    type="button"
+                    onClick={() => setEndpointFormMode('single')}
+                    className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
+                      endpointFormMode === 'single'
+                        ? 'bg-primary-500/20 text-primary-400 border-b-2 border-primary-500'
+                        : 'bg-dark-800 text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    <div className="flex items-center justify-center gap-2">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                      单节点配置
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEndpointFormMode('multi')}
+                    className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
+                      endpointFormMode === 'multi'
+                        ? 'bg-primary-500/20 text-primary-400 border-b-2 border-primary-500'
+                        : 'bg-dark-800 text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    <div className="flex items-center justify-center gap-2">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                      </svg>
+                      多节点配置
+                    </div>
+                  </button>
+                </div>
+
+                {/* 表单内容 */}
+                <div className="p-4">
+                  {endpointFormMode === 'single' ? (
+                    <SingleNodeForm
+                      value={singleNodeData}
+                      onChange={setSingleNodeData}
+                      errors={nodeFormErrors}
+                    />
+                  ) : (
+                    <MultiNodeForm
+                      value={multiNodeData}
+                      onChange={setMultiNodeData}
+                      errors={nodeFormErrors}
+                    />
+                  )}
+                </div>
+              </div>
+
+              {/* 高级模式 - JSON 编辑器 */}
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">
-                  LiteLLM 参数 (JSON)
-                </label>
-                <textarea
-                  value={typeof form.litellm_params === 'object' ? JSON.stringify(form.litellm_params, null, 2) : form.litellm_params}
-                  onChange={(e) => handleJsonChange(e.target.value)}
-                  placeholder='例如：{"litellm_params": {"api_key": "sk-..."}}'
-                  rows={6}
-                  className={`w-full bg-dark-700 border rounded-lg px-4 py-2 text-white font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary-500 ${
-                    formErrors.litellm_params ? 'border-red-500' : 'border-dark-600'
-                  }`}
-                />
-                {formErrors.litellm_params && (
-                  <p className="text-red-400 text-xs mt-1">{formErrors.litellm_params}</p>
-                )}
-                <p className="text-gray-500 text-xs mt-1">配置 LiteLLM 所需参数，如 api_key, base_url 等</p>
+                <details className="group">
+                  <summary className="flex justify-between items-center cursor-pointer list-none text-sm text-gray-400 hover:text-white">
+                    <span>高级模式：JSON 代码视图</span>
+                    <svg
+                      className="w-4 h-4 text-gray-400 transition-transform group-open:rotate-180"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </summary>
+                  <div className="mt-3">
+                    <textarea
+                      value={typeof form.litellm_params === 'object' && form.litellm_params !== null ? JSON.stringify(form.litellm_params, null, 2) : form.litellm_params || ''}
+                      onChange={(e) => handleJsonChange(e.target.value)}
+                      placeholder='例如：{"model": "gpt-4", "api_key": "sk-..."}'
+                      rows={8}
+                      className="w-full bg-dark-700 border border-dark-600 rounded-lg px-4 py-2 text-white font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    />
+                    <p className="text-gray-500 text-xs mt-1">
+                      💡 提示：建议使用上方表单进行配置，JSON 编辑仅在需要高级配置时使用
+                    </p>
+                  </div>
+                </details>
               </div>
 
               {/* 激活状态 */}

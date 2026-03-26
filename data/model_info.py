@@ -9,6 +9,7 @@ litellm 路由层模型配置模型
 
 用法示例见各 class 的 `model_config` 中的 json_schema_extra。
 """
+import warnings
 from typing import List, Literal, Union, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -138,7 +139,6 @@ class ModelConfig(BaseModel):
             min_tokens = params.max_tokens
 
         if self.default_rpm and self.default_rpm > min_rpm:
-            import warnings
             warnings.warn(f"全局 rpm({self.default_rpm}) > 节点最小 rpm({min_rpm})，可能导致限流失效")
         if self.default_tpm and self.default_tpm > min_tpm:
             warnings.warn(f"全局 tpm({self.default_tpm}) > 节点最小 tpm({min_tpm})，可能导致限流失效")

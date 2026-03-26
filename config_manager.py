@@ -242,9 +242,34 @@ class ConfigManager:
 
         if isinstance(litellm_params, dict):
             if "endpoints" in litellm_params:
-                params = ModelInfoList(**litellm_params)
+                # 多节点模式 - 确保每个端点有必要的默认值
+                endpoints_data = litellm_params.get("endpoints", [])
+                endpoints_with_defaults = []
+                for ep in endpoints_data:
+                    endpoint = ModelEndPoint(
+                        model=ep.get("model", ""),
+                        api_key=ep.get("api_key", ""),
+                        base_url=ep.get("base_url", ""),
+                        provider=ep.get("provider", "openai"),
+                        max_tokens=ep.get("max_tokens", 4096),
+                        rpm=ep.get("rpm", 60),
+                        tpm=ep.get("tpm", 100000),
+                        weight=ep.get("weight", 1),
+                    )
+                    endpoints_with_defaults.append(endpoint)
+                params = ModelInfoList(endpoints=endpoints_with_defaults)
             else:
-                params = ModelEndPoint(**litellm_params)
+                # 单节点模式 - 确保有必要的默认值
+                params = ModelEndPoint(
+                    model=litellm_params.get("model", ""),
+                    api_key=litellm_params.get("api_key", ""),
+                    base_url=litellm_params.get("base_url", ""),
+                    provider=litellm_params.get("provider", "openai"),
+                    max_tokens=litellm_params.get("max_tokens", 4096),
+                    rpm=litellm_params.get("rpm", 60),
+                    tpm=litellm_params.get("tpm", 100000),
+                    weight=litellm_params.get("weight", 1),
+                )
 
         return ModelConfig(
             model_name=db_model_config.model_name,
@@ -313,9 +338,20 @@ async def async_get_model_config(
 
             if isinstance(litellm_params, dict):
                 if "endpoints" in litellm_params:
+                    # 多节点模式
                     params = ModelInfoList(**litellm_params)
                 else:
-                    params = ModelEndPoint(**litellm_params)
+                    # 单节点模式 - 确保有必要的默认值
+                    params = ModelEndPoint(
+                        model=litellm_params.get("model", ""),
+                        api_key=litellm_params.get("api_key", ""),
+                        base_url=litellm_params.get("base_url", ""),
+                        provider=litellm_params.get("provider", "openai"),
+                        max_tokens=litellm_params.get("max_tokens", 4096),
+                        rpm=litellm_params.get("rpm", 60),
+                        tpm=litellm_params.get("tpm", 100000),
+                        weight=litellm_params.get("weight", 1),
+                    )
 
             return ModelConfig(
                 model_name=db_config.model_name,

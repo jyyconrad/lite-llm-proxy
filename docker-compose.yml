@@ -46,12 +46,17 @@ services:
     container_name: litellm_app
     restart: unless-stopped
     ports:
-      - ${PORT-8000}:${PORT-8000}
+      - ${PORT-8000}:8000
     env_file:
-      - .env-docker
+      - .env
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:admin1234@db:5432/litellm_gateway}
-      REDIS_URL: ${REDIS_URL:-redis://:admin1234@redis:6379}
+      PORT: 8000
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:admin1234@host.docker.internal:5433/litellm_gateway}
+      REDIS_URL: ${REDIS_URL:-redis://admin1234@host.docker.internal:6379}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTP_PROXYS: ${HTTP_PROXYS:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./logs:/app/logs
       - ./dist:/app/dist

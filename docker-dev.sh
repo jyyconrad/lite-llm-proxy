@@ -20,7 +20,7 @@ echo -e "${YELLOW}使用镜像 TAG: ${TAG}${NC}"
 # 2. 复制环境配置文件
 if [ -f ".env-local" ]; then
     echo -e "${YELLOW}复制.env-local 到.env...${NC}"
-    cp .env-docker .env
+    cp .env-local .env
 
     # 添加 TAG 信息到.env 文件
     echo -e "${YELLOW}添加 TAG 信息到.env 文件...${NC}"
@@ -31,6 +31,14 @@ if [ -f ".env-local" ]; then
     else
         echo "TAG=${TAG}" >> .env
     fi
+
+    # 将 127.0.0.1 替换为 host.docker.internal 以支持 Docker 容器访问宿主机
+    if grep -q "127.0.0.1" .env; then
+        echo -e "${YELLOW}将 127.0.0.1 替换为 host.docker.internal...${NC}"
+        sed -i.bak 's/127.0.0.1/host.docker.internal/g' .env
+        rm -f .env.bak
+    fi
+
     echo -e "${GREEN}环境配置文件已更新${NC}"
 else
     echo -e "${RED}错误：.env-local 文件不存在！${NC}"

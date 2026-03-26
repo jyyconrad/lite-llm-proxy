@@ -765,8 +765,10 @@ def _convert_litellm_params_to_dict(params: any) -> dict:
     if isinstance(params, dict):
         return params
     elif hasattr(params, "model_dump"):
-        return params.model_dump()
+        # Pydantic v2
+        return params.model_dump(mode='json')
     elif hasattr(params, "dict"):
+        # Pydantic v1
         return params.dict()
     else:
         return params
@@ -818,11 +820,11 @@ async def list_model_configs(
 ):
     """获取所有模型配置列表（仅管理员可用）"""
     if include_inactive:
-        stmt = select(ModelConfig).order_by(ModelConfig.created_at.desc())
+        stmt = select(ModelConfig).order_by(ModelConfig.updated_at.desc())
     else:
         stmt = select(ModelConfig).where(
             ModelConfig.is_active == True
-        ).order_by(ModelConfig.created_at.desc())
+        ).order_by(ModelConfig.updated_at.desc())
 
     result = await db.execute(stmt)
     configs = result.scalars().all()

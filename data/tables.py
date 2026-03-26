@@ -88,21 +88,17 @@ class ModelConfig(Base):
 
     def to_pydantic(self) -> "ModelConfigPydantic":
         """转换为 Pydantic 模型用于 API 响应"""
-        from data.model_info import ModelEndPoint, ModelInfoList
         from gateway.models import ModelConfigPydantic
 
-        litellm_params = self.litellm_params
-        params = None
-        if isinstance(litellm_params, dict):
-            if "endpoints" in litellm_params:
-                params = ModelInfoList(**litellm_params)
-            else:
-                params = ModelEndPoint(**litellm_params)
+        # litellm_params 保持为字典格式，避免 Pydantic 对象序列化问题
+        litellm_params_dict = self.litellm_params
+        if not isinstance(litellm_params_dict, dict):
+            litellm_params_dict = {}
 
         return ModelConfigPydantic(
             id=self.id,
             model_name=self.model_name,
-            litellm_params=params,
+            litellm_params=litellm_params_dict,
             support_types=self.support_types or ["text"],
             default_rpm=self.default_rpm,
             default_tpm=self.default_tpm,

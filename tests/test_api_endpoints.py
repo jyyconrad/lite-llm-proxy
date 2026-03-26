@@ -9,9 +9,10 @@ from openai import OpenAI
 from pathlib import Path
 
 # 配置信息
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:9989"
 # API_KEY = "sk-n45ZyjjQ"  # 从.env文件中获取的master key
 API_KEY = "admin1234"
+V1_URL = f"{BASE_URL}/v1"
 
 def load_models_from_config():
     """从配置文件加载模型信息"""
@@ -551,11 +552,317 @@ async def main():
     else:
         print("⚠️  部分测试失败，请检查服务器状态和配置")
 
+
+
+async def test_glm47_tool_calls():
+    """测试工具调用功能（包含 stream 和非 stream 模式）- 使用 deepseek-v3.1 模型"""
+    print("\n=== 测试工具调用功能 ===")
+
+    # 使用 deepseek-v3.1 模型（可用的模型）
+    model_name = "GLM-4.7"
+    print(f"使用的模型：{model_name}")
+
+    # 定义工具
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_current_weather",
+                "description": "获取当前天气情况",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "城市名称，例如：北京、上海"
+                        },
+                        "unit": {
+                            "type": "string",
+                            "enum": ["celsius", "fahrenheit"],
+                            "description": "温度单位"
+                        }
+                    },
+                    "required": ["location"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate",
+                "description": "执行数学计算",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "expression": {
+                            "type": "string",
+                            "description": "数学表达式，例如：2 + 2 * 3"
+                        }
+                    },
+                    "required": ["expression"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_web",
+                "description": "搜索网络信息",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "搜索关键词"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }
+    ]
+
+    # 测试场景 - 精简到 5 个核心场景
+    test_scenarios = [
+        {
+            "name": "天气查询",
+            "messages": [{"role": "user", "content": "北京今天天气怎么样？"}]
+        },
+        {
+            "name": "数学计算",
+            "messages": [{"role": "user", "content": "请计算 256 乘以 128 等于多少"}]
+        },
+        {
+            "name": "网络搜索",
+            "messages": [{"role": "user", "content": "帮我搜索一下最新的 AI 新闻"}]
+        },
+        {
+            "name": "多轮对话 - 天气",
+            "messages": [
+                {"role": "user", "content": "我想了解天气"},
+                {"role": "assistant", "content": "当然，请问您想查询哪个城市的天气？"},
+                {"role": "user", "content": "上海"}
+            ]
+        },
+        {
+            "name": "复杂工具调用",
+            "messages": [
+                {"role": "user", "content": "先帮我计算 100 除以 4，然后搜索一下计算结果相关的新闻"}
+            ]
+        }
+    ]
+
+    results = []
+
+    for scenario in test_scenarios:
+        print(f"\n--- 测试场景：{scenario['name']} ---")
+
+        # 测试 stream=true 模式
+        print("\n[Stream=true 模式]")
+        stream_result = await _test_tool_call_with_stream(model_name, scenario['messages'], tools)
+
+        # 测试 stream=false 模式
+        print("\n[Stream=false 模式]")
+        non_stream_result = await _test_tool_call_without_stream(model_name, scenario['messages'], tools)
+
+        results.append({
+            "scenario": scenario['name'],
+            "stream": stream_result,
+            "non_stream": non_stream_result
+        })
+
+    # 输出测试总结
+    print("\n" + "="*50)
+    print("📊 工具调用测试总结")
+    print("="*50)
+
+    for result in results:
+        stream_status = "✅" if result['stream'] else "❌"
+        non_stream_status = "✅" if result['non_stream'] else "❌"
+        print(f"{result['scenario']}: Stream={stream_status} 非 Stream={non_stream_status}")
+
+    # 检查是否有失败的场景
+    all_passed = all(r['stream'] and r['non_stream'] for r in results)
+    if all_passed:
+        print("\n🎉 所有工具调用测试通过！")
+    else:
+        print("\n⚠️  部分工具调用测试失败，请检查日志")
+
+    return all_passed
+
+
+async def _test_tool_call_with_stream(model_name, messages, tools):
+    """测试带 stream 的工具调用"""
+    client = OpenAI(base_url=V1_URL, api_key=API_KEY)
+
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            tools=tools,
+            stream=True
+        )
+
+        tool_calls_detected = False
+        content_parts = []
+        tool_call_details = []
+        final_message = None
+
+        print("AI 响应：", end="", flush=True)
+        for chunk in response:
+            if not hasattr(chunk, 'choices') or not chunk.choices or len(chunk.choices) == 0:
+                continue
+
+            choice = chunk.choices[0]
+
+            # 检查 delta 内容
+            delta = getattr(choice, 'delta', None)
+            if delta:
+                # 收集内容
+                if hasattr(delta, 'content') and delta.content:
+                    content_parts.append(delta.content)
+                    print(delta.content, end="", flush=True)
+
+                # 检查是否有工具调用
+                if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                    tool_calls_detected = True
+                    for tc in delta.tool_calls:
+                        if hasattr(tc, 'function') and tc.function:
+                            func_name = getattr(tc.function, 'name', 'unknown') or 'unknown'
+                            func_args = getattr(tc.function, 'arguments', None)
+                            # 如果 args 是字典，转换为字符串
+                            if isinstance(func_args, dict):
+                                func_args_str = str(func_args)
+                            elif func_args is None:
+                                func_args_str = '{}'
+                            else:
+                                func_args_str = str(func_args)
+                            tool_call_details.append({
+                                'name': func_name,
+                                'args': func_args_str
+                            })
+                            print(f"\n[工具调用] {func_name}({func_args_str})", end="", flush=True)
+
+            # 检查 final message（某些 chunk 可能只有 message 没有 delta）
+            if hasattr(choice, 'message') and choice.message:
+                final_message = choice.message
+
+            # 检查用量信息
+            if hasattr(chunk, 'usage') and chunk.usage:
+                print(f"\n[用量] 输入：{chunk.usage.prompt_tokens}, 输出：{chunk.usage.completion_tokens}, 总计：{chunk.usage.total_tokens}")
+
+        # 处理最终消息中的 tool_calls
+        if final_message:
+            # 检查 final message 中的 tool_calls
+            if hasattr(final_message, 'tool_calls') and final_message.tool_calls:
+                tool_calls_detected = True
+                # 无论是否在 stream 中检测到，都打印工具调用详情
+                print(f"\n[检测到 {len(final_message.tool_calls)} 个工具调用]")
+                for tc in final_message.tool_calls:
+                    func = getattr(tc, 'function', {})
+                    if isinstance(func, dict):
+                        name = func.get('name', 'unknown')
+                        args = func.get('arguments', {})
+                    else:
+                        name = getattr(func, 'name', 'unknown')
+                        args = getattr(func, 'arguments', {})
+                    if isinstance(args, dict):
+                        args_str = str(args)
+                    else:
+                        args_str = str(args)
+                    tool_call_details.append({
+                        'name': name,
+                        'args': args_str[:50] + ('...' if len(args_str) > 50 else '')
+                    })
+                    print(f"  - {name}({args_str[:50]}{'...' if len(args_str) > 50 else ''})", end="", flush=True)
+
+            # 检查最终消息内容
+            if hasattr(final_message, 'content') and final_message.content and not content_parts:
+                print(final_message.content)
+
+        # 如果没有内容输出，检查最终消息
+        if not content_parts and final_message and not tool_calls_detected:
+            if hasattr(final_message, 'content') and final_message.content:
+                print(final_message.content)
+
+        print()  # 换行
+        if tool_calls_detected:
+            if tool_call_details:
+                print(f"✅ Stream 模式：检测到 {len(tool_call_details)} 个工具调用:")
+                for detail in tool_call_details:
+                    print(f"   - {detail['name']}({detail['args']})")
+            else:
+                print(f"✅ Stream 模式：检测到工具调用")
+        else:
+            print("✅ Stream 模式：测试完成（普通文本响应）")
+
+        return True
+
+    except Exception as e:
+        print(f"\n❌ Stream 模式测试失败：{e}")
+        return False
+
+
+async def _test_tool_call_without_stream(model_name, messages, tools):
+    """测试不带 stream 的工具调用"""
+    client = OpenAI(base_url=V1_URL, api_key=API_KEY)
+
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            tools=tools,
+            stream=False
+        )
+
+        result = response.model_dump()
+
+        # 检查是否有工具调用
+        tool_calls = None
+        if 'choices' in result and len(result['choices']) > 0:
+            message = result['choices'][0].get('message', {})
+            tool_calls = message.get('tool_calls')
+            content = message.get('content', '')
+
+            if tool_calls:
+                print(f"\n[工具调用] 检测到 {len(tool_calls)} 个工具调用:")
+                for tc in tool_calls:
+                    func = tc.get('function', {})
+                    name = func.get('name', 'unknown')
+                    args = func.get('arguments', {})
+                    # 如果 args 是字典，转换为字符串
+                    if isinstance(args, dict):
+                        args_str = str(args)
+                    else:
+                        args_str = str(args)
+                    print(f"  - {name}({args_str[:50]}...)")
+
+            if content:
+                print(f"[回复内容] {content[:200]}{'...' if len(content) > 200 else ''}")
+
+        # 显示用量
+        usage = result.get('usage', {})
+        if usage:
+            print(f"[用量] 输入：{usage.get('prompt_tokens', 0)}, 输出：{usage.get('completion_tokens', 0)}, 总计：{usage.get('total_tokens', 0)}")
+
+        if tool_calls:
+            print("✅ 非 Stream 模式：检测到工具调用")
+        else:
+            print("✅ 非 Stream 模式：测试完成（普通文本响应）")
+
+        return True
+
+    except Exception as e:
+        print(f"\n❌ 非 Stream 模式测试失败：{e}")
+        return False
+
+
 if __name__ == "__main__":
     # asyncio.run(main())
     # asyncio.run(test_embeddings())
-    asyncio.run(test_completion_stream(True))
-    asyncio.run(test_completion_stream(False))
+    # asyncio.run(test_completion_stream(True))
+    # asyncio.run(test_completion_stream(False))
+    asyncio.run(test_glm47_tool_calls())
 
 
 
